@@ -58,7 +58,7 @@ async function getTaskReposForOrg(orgName) {
     const topics = await getRepoTopics(orgName, r.name);
     if (topics.includes('type-task')) {
       const deadline = topics.find(t => t.startsWith('deadline-'));
-      tasks.push({ repoOwner: orgName, repoName: r.name, name: r.name, description: r.description || '', deadline: deadline ? deadline.replace('deadline-', '') : null, orgName });
+      tasks.push({ repoOwner: orgName, repoName: r.name, name: r.name, description: r.description || '', deadline: deadline ? deadline.replace('deadline-', '') : null, questions: topics.includes('questoes-individuais'), orgName });
     }
   }
   return tasks;
@@ -83,6 +83,24 @@ function createDeliveryIssue(giteaUser, repo, deadlineDate) {
     'Entrega: ' + repo,
     'Issue de entrega automática.\n\nPrazo: ' + (deadlineDate || 'Sem prazo definido'),
     dueDate).catch(() => {});
+}
+
+// Aceite de tarefa (usado pelo link da tarefa e pelo painel do aluno).
+// O fork criado com o token do aluno é o registro do aceite. Retorna o fork
+// ou null se o aluno já tinha um fork desta tarefa.
+async function acceptTask(owner, repo, giteaUser, deadlineDate) {
+  const fork = await createForkSafe(owner, repo, buildForkName(owner, giteaUser, repo));
+  if (fork === null) return null;
+  const forkOwner = fork.owner.login;
+  await enableRepoIssues(forkOwner, fork.name).catch(() => {});
+  // Professores entram como colaboradores com escrita: acompanham o fork e
+  // gravam a questão sorteada no README.
+  const owners = await listOrgOwners(owner);
+  for (const prof of owners) {
+    await addRepoCollaborator(forkOwner, fork.name, prof.login, 'write').catch(() => {});
+  }
+  if (deadlineDate) createDeliveryIssue(forkOwner, fork.name, deadlineDate);
+  return fork;
 }
 
 async function refreshToken() {
@@ -489,6 +507,75 @@ async function listRepoTags(owner, repo) {
   return Array.isArray(res) ? res : [];
 }
 
+// ── Arquivos do repositório (API de conteúdo) ──
+
+function _contentsPath(owner, repo, path) {
+  const p = String(path || '').split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents${p ? '/' + p : ''}`;
+}
+
+function encodeBase64Utf8(text) {
+  const bytes = new TextEncoder().encode(text);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+function decodeBase64Utf8(b64) {
+  const bin = atob(String(b64 || '').replace(/\s/g, ''));
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function _isNotFound(err) {
+  return /404|not found|does not exist|object does not exist/i.test((err && err.message) || '');
+}
+
+// Lê um arquivo de texto. Retorna { path, sha, content } ou null se não existir.
+async function getRepoFile(owner, repo, path) {
+  try {
+    const f = await _fetch(_contentsPath(owner, repo, path));
+    if (!f || Array.isArray(f) || f.type !== 'file') return null;
+    return { path: f.path, sha: f.sha, content: decodeBase64Utf8(f.content) };
+  } catch (err) {
+    if (_isNotFound(err)) return null;
+    throw err;
+  }
+}
+
+// Lista um diretório. Retorna [] se não existir.
+async function listRepoDir(owner, repo, path) {
+  try {
+    const res = await _fetch(_contentsPath(owner, repo, path));
+    return Array.isArray(res) ? res : [];
+  } catch (err) {
+    if (_isNotFound(err)) return [];
+    throw err;
+  }
+}
+
+// Grava vários arquivos num único commit.
+// files: [{ path, content, sha? }] — com sha atualiza, sem sha cria; { path, sha, delete: true } apaga.
+async function changeRepoFiles(owner, repo, files, message) {
+  return _fetch(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents`, {
+    method: 'POST',
+    body: JSON.stringify({
+      message,
+      files: files.map(f => f.delete
+        ? { operation: 'delete', path: f.path, sha: f.sha }
+        : { operation: f.sha ? 'update' : 'create', path: f.path, content: encodeBase64Utf8(f.content), ...(f.sha ? { sha: f.sha } : {}) }),
+    }),
+  });
+}
+
+// Cria ou atualiza um único arquivo.
+async function putRepoFile(owner, repo, path, content, sha, message) {
+  return _fetch(_contentsPath(owner, repo, path), {
+    method: sha ? 'PUT' : 'POST',
+    body: JSON.stringify({ content: encodeBase64Utf8(content), message, ...(sha ? { sha } : {}) }),
+  });
+}
+
 async function deleteRepo(owner, repo) {
   return _fetch(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`, {
     method: 'DELETE',
@@ -552,4 +639,4 @@ async function logout() {
 
 window.logout = logout;
 
-export { getToken, getBaseUrl, getGiteaUrl, getDisplayUrl, getForgejoLogoutUrl, CACHE_KEY_CLASSES, CACHE_KEY_TASKS, requireAuth, displayUserInfo, loadOwnerOrgs, getTaskReposForOrg, buildForkName, createForkSafe, createDeliveryIssue, listOrganizations, listOwnerOrganizations, listOrgRepos, listUserRepos, createFork, checkFork, listForks, listCommits, countCommitsSince, createOrganization, createOrgRepo, addTeamRepo, protectTaskBranch, addRepoCollaborator, deleteRepo, findUserByEmail, listOrgTeams, listOrgOwners, getTeamByName, createOrgTeam, ensureAlunosTeam, addTeamMember, removeOrgMember, getRepo, getRepoTopics, setRepoTopic, listTeamMembers, createRepoIssue, listRepoIssues, enableRepoIssues, createRepoTag, listRepoTags, waitForAuth, removeRepoTopic };
+export { getToken, getBaseUrl, getGiteaUrl, getDisplayUrl, getForgejoLogoutUrl, CACHE_KEY_CLASSES, CACHE_KEY_TASKS, requireAuth, displayUserInfo, loadOwnerOrgs, getTaskReposForOrg, buildForkName, createForkSafe, createDeliveryIssue, acceptTask, listOrganizations, listOwnerOrganizations, listOrgRepos, listUserRepos, createFork, checkFork, listForks, listCommits, countCommitsSince, createOrganization, createOrgRepo, addTeamRepo, protectTaskBranch, addRepoCollaborator, deleteRepo, findUserByEmail, listOrgTeams, listOrgOwners, getTeamByName, createOrgTeam, ensureAlunosTeam, addTeamMember, removeOrgMember, getRepo, getRepoTopics, setRepoTopic, listTeamMembers, createRepoIssue, listRepoIssues, enableRepoIssues, createRepoTag, listRepoTags, waitForAuth, removeRepoTopic, getRepoFile, listRepoDir, changeRepoFiles, putRepoFile };

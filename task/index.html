@@ -20,7 +20,7 @@
   </main>
 
   <script type="module">
-    import { requireAuth, getDisplayUrl, buildForkName, createForkSafe, createDeliveryIssue, getRepo, checkFork, enableRepoIssues, addRepoCollaborator, listOrgOwners } from '../components/gitea-api.js';
+    import { requireAuth, getDisplayUrl, acceptTask, getRepo, checkFork } from '../components/gitea-api.js';
 
     // Sem acesso ao repositório: quase sempre o aluno ainda não foi incluído na turma.
     // Só o professor inclui alunos (Alunos da turma ou "Aprovar" em Detalhes da tarefa).
@@ -215,21 +215,12 @@
                 btn.textContent = 'Aceitando...';
 
                 try {
-                  const fork = await createForkSafe(owner, repo, buildForkName(owner, giteaUser, repo));
+                  const fork = await acceptTask(owner, repo, giteaUser, deadlineDate);
                   if (fork === null) {
                     msg.innerHTML = '<div class="success-msg">Você já possui um fork desta tarefa.</div>';
                     return;
                   }
-
                   const forkName = fork.name;
-                  await enableRepoIssues(fork.owner.login, forkName).catch(() => {});
-                  const owners = await listOrgOwners(owner);
-                  for (const prof of owners) {
-                    await addRepoCollaborator(fork.owner.login, forkName, prof.login, 'write').catch(() => {});
-                  }
-                  if (deadlineDate) {
-                    createDeliveryIssue(giteaUser, forkName, deadlineDate);
-                  }
 
                   document.getElementById('accept-area').innerHTML =
                     '<div class="success-msg">Tarefa aceita com sucesso!</div>' +

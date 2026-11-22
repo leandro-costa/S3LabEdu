@@ -13,6 +13,12 @@
   <script type="module" src="../components/tab-nav.js"></script>
   <style>
     #tarefas-form-area:not(:empty) { margin-bottom: 20px; }
+    .questions-toggle { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+    .questions-toggle input { width: auto; }
+    .question-list { display: flex; flex-direction: column; gap: 12px; margin: 8px 0; }
+    .question-item { display: flex; flex-direction: column; gap: 6px; }
+    .question-item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .question-item textarea { width: 100%; min-height: 96px; font-family: inherit; resize: vertical; }
   </style>
 </head>
 <body data-theme="bancada">
@@ -25,6 +31,7 @@
   <script type="module">
     import { listOwnerOrganizations, listOrgRepos, createOrgRepo, ensureAlunosTeam, addTeamRepo, protectTaskBranch, getRepoTopics, setRepoTopic, deleteRepo, requireAuth, displayUserInfo, getDisplayUrl, loadOwnerOrgs, getTaskReposForOrg, CACHE_KEY_CLASSES, CACHE_KEY_TASKS, listForks, createRepoTag, listRepoTags, getRepo, removeRepoTopic } from '../components/gitea-api.js';
     import { getSelectedOrg, setSelectedOrg, orgSelectHtml } from '../components/org-filter.js';
+    import { QUESTIONS_DIR, loadTaskQuestions, saveTaskQuestions, distributeQuestions } from '../components/task-questions.js';
 
     await requireAuth();
     displayUserInfo('teacher');
@@ -93,6 +100,7 @@
               <td><ui-date value="${t.deadline}"></ui-date></td>
               <td><a href="${giteaUrl}/${org}/${t.name}" target="_blank">${org}/${t.name}</a></td>
               <td><button class="btn btn-sm btn-secondary" onclick="copyTaskLink('${org}', '${t.name}', this)">Copiar Link</button>
+                ${t.questions ? `<button class="btn btn-sm btn-primary" onclick="sortearQuestoes('${org}', '${t.name}', this)" title="Grava uma questão no README de cada fork que ainda não tem">Sortear questões</button>` : ''}
                 <button class="btn btn-sm btn-primary" onclick="collectForks('${org}', '${t.name}', this)">Coletar</button>
                 <button class="btn btn-sm btn-secondary" onclick="getCollectScript('${org}', '${t.name}', this)">Script</button>
                 <button class="btn btn-sm btn-danger" onclick="deleteTaskRepo('${org}', '${t.name}', this)">Excluir</button></td>
@@ -123,10 +131,21 @@
           <div class="form-group"><label>Nome da Tarefa</label><input type="text" id="task-name" placeholder="Ex: Projeto 1" /></div>
           <div class="form-group"><label>Prazo</label><input type="date" id="task-deadline" min="${today}" /></div>
           <div class="form-group"><label>Repositório Existente</label>
-            <select id="task-repo"><option value="">Carregando...</option></select>
+            <select id="task-repo" onchange="taskRepoChanged()"><option value="">Carregando...</option></select>
             <small id="task-repo-hint" style="color:var(--color-text-secondary)"></small>
           </div>
-          <div class="form-group"><label>Ou criar novo repositório</label><input type="text" id="task-new-repo" placeholder="Nome do novo repositório" /></div>
+          <div class="form-group"><label>Ou criar novo repositório</label><input type="text" id="task-new-repo" placeholder="Nome do novo repositório" oninput="taskRepoChanged()" />
+            <small id="task-new-repo-hint" style="color:var(--color-text-secondary)"></small>
+          </div>
+          <div class="form-group">
+            <label class="questions-toggle"><input type="checkbox" id="task-questions-enabled" onchange="toggleQuestions()" /> Questões individuais (uma questão sorteada para cada aluno)</label>
+            <small style="color:var(--color-text-secondary)">As questões ficam no próprio repositório da tarefa, em <span class="mono">${QUESTIONS_DIR}/</span>. Depois que os alunos aceitarem, use <strong>Sortear questões</strong>: cada fork recebe a sua questão no README.md.</small>
+            <div id="task-questions-area" hidden>
+              <small id="task-questions-hint" style="color:var(--color-text-secondary)"></small>
+              <div class="question-list" id="task-question-list"></div>
+              <button type="button" class="btn btn-sm btn-secondary" onclick="addQuestionField()">+ Adicionar questão</button>
+            </div>
+          </div>
           <div class="form-actions">
             <button class="btn btn-secondary" onclick="cancelTaskForm()">Cancelar</button>
             <button class="btn btn-primary" onclick="createTask(this)">Criar Tarefa</button>
@@ -164,6 +183,112 @@
           ? `A turma ${org} não possui repositórios. Crie um novo abaixo.`
           : `Todos os repositórios da turma ${org} já são tarefas. Crie um novo abaixo.`;
       }
+      taskRepoNamesByOrg[org] = usedRepos;
+      taskRepoChanged();
+    };
+
+    // Repositórios que já são tarefa, por turma (para avisar ao digitar um nome repetido)
+    const taskRepoNamesByOrg = {};
+
+    // ── Questões individuais no formulário ──
+    // Cada campo guarda o id da questão que veio do repositório (data-qid), para
+    // que editar uma questão existente atualize o mesmo arquivo.
+
+    function questionFieldsHtmlCount() {
+      return document.querySelectorAll('#task-question-list .question-item').length;
+    }
+
+    function renumberQuestionFields() {
+      document.querySelectorAll('#task-question-list .question-item').forEach((item, i) => {
+        const label = item.querySelector('.question-label');
+        label.textContent = item.dataset.qid ? `Questão ${i + 1} (${QUESTIONS_DIR}/${item.dataset.qid}.md)` : `Questão ${i + 1} (nova)`;
+      });
+    }
+
+    window.addQuestionField = function(content = '', qid = '') {
+      const list = document.getElementById('task-question-list');
+      if (!list) return;
+      const item = document.createElement('div');
+      item.className = 'question-item';
+      if (qid) item.dataset.qid = qid;
+      item.innerHTML = `
+        <div class="question-item-head">
+          <span class="question-label"></span>
+          <button type="button" class="btn btn-sm btn-secondary">Remover</button>
+        </div>
+        <textarea placeholder="Enunciado em Markdown"></textarea>`;
+      item.querySelector('textarea').value = content;
+      item.querySelector('button').addEventListener('click', () => { item.remove(); renumberQuestionFields(); });
+      list.appendChild(item);
+      renumberQuestionFields();
+    };
+
+    window.toggleQuestions = function() {
+      const enabled = document.getElementById('task-questions-enabled').checked;
+      document.getElementById('task-questions-area').hidden = !enabled;
+      if (enabled && questionFieldsHtmlCount() === 0) addQuestionField();
+    };
+
+    function collectQuestionFields() {
+      return [...document.querySelectorAll('#task-question-list .question-item')].map(item => ({
+        id: item.dataset.qid || null,
+        content: item.querySelector('textarea').value,
+      }));
+    }
+
+    // Repositório escolhido no formulário: o novo nome (se digitado) ou o existente selecionado.
+    function chosenRepoName() {
+      const typed = (document.getElementById('task-new-repo')?.value || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+      return typed || document.getElementById('task-repo')?.value || '';
+    }
+
+    let questionsLoadSeq = 0;
+
+    // Quando o repositório já existe, mostra isso e carrega as questões que ele já tem.
+    window.taskRepoChanged = async function() {
+      const org = document.getElementById('task-form-org')?.value;
+      const typed = (document.getElementById('task-new-repo')?.value || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+      const newHint = document.getElementById('task-new-repo-hint');
+      const qHint = document.getElementById('task-questions-hint');
+      const seq = ++questionsLoadSeq;
+      const repo = chosenRepoName();
+
+      let exists = false;
+      if (typed) {
+        const repos = await loadRepos(org).catch(() => []);
+        if (seq !== questionsLoadSeq) return;
+        exists = (repos || []).some(r => r.name === typed);
+        if (newHint) newHint.textContent = exists
+          ? (taskRepoNamesByOrg[org]?.has(typed)
+            ? `${org}/${typed} já é uma tarefa: nome, prazo e questões serão atualizados.`
+            : `Já existe um repositório ${org}/${typed}: ele será usado como tarefa, sem criar outro.`)
+          : (typed !== document.getElementById('task-new-repo').value.trim() ? `Será criado como ${typed}.` : '');
+      } else {
+        if (newHint) newHint.textContent = '';
+        exists = !!repo;
+      }
+
+      // Recomeça a lista de questões a partir do repositório escolhido.
+      document.getElementById('task-question-list').innerHTML = '';
+      if (qHint) qHint.textContent = '';
+      if (!exists) {
+        if (document.getElementById('task-questions-enabled').checked) addQuestionField();
+        return;
+      }
+      if (qHint) qHint.textContent = `Procurando questões em ${org}/${repo}/${QUESTIONS_DIR}/...`;
+      let questions = [];
+      try { questions = await loadTaskQuestions(org, repo); }
+      catch (e) { if (seq === questionsLoadSeq && qHint) qHint.textContent = 'Erro ao ler as questões: ' + e.message; return; }
+      if (seq !== questionsLoadSeq) return;
+      if (questions.length) {
+        document.getElementById('task-questions-enabled').checked = true;
+        document.getElementById('task-questions-area').hidden = false;
+        questions.forEach(q => addQuestionField(q.content, q.id));
+        if (qHint) qHint.textContent = `O repositório já tem ${questions.length} questão(ões) em ${QUESTIONS_DIR}/ — carregadas abaixo. Edite, remova ou adicione.`;
+      } else {
+        if (qHint) qHint.textContent = `O repositório ainda não tem questões em ${QUESTIONS_DIR}/.`;
+        if (document.getElementById('task-questions-enabled').checked) addQuestionField();
+      }
     };
 
     window.cancelTaskForm = function() {
@@ -177,6 +302,12 @@
       if (!name) { btn.disabled = false; alert('Informe o nome da tarefa.'); return; }
       const deadline = document.getElementById('task-deadline').value;
       let repo = document.getElementById('task-new-repo').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+      const questionsEnabled = document.getElementById('task-questions-enabled').checked;
+      const questionFields = questionsEnabled ? collectQuestionFields() : [];
+      if (questionsEnabled && !questionFields.some(q => q.content.trim())) {
+        btn.disabled = false; alert('Cadastre ao menos uma questão ou desmarque "Questões individuais".');
+        return;
+      }
 
       let team;
       try {
@@ -198,6 +329,17 @@
             btn.disabled = false; alert('Erro ao criar repositório: ' + e.message);
             return;
           }
+        }
+      }
+
+      // Grava as questões antes de proteger a branch e de qualquer aluno aceitar:
+      // o fork copia o repositório como está.
+      if (questionsEnabled) {
+        try {
+          await saveTaskQuestions(org, repo, questionFields);
+        } catch (e) {
+          btn.disabled = false; alert('Erro ao gravar as questões: ' + e.message);
+          return;
         }
       }
 
@@ -338,6 +480,40 @@
       history.replaceState(null, '', url);
       window.dispatchEvent(new CustomEvent('org-changed'));
       render();
+    };
+
+    window.sortearQuestoes = async function(org, repo, btn) {
+      if (!confirm(`Sortear questões para os alunos de ${org}/${repo} que ainda não têm uma?\n\nQuem já recebeu questão não é alterado.`)) return;
+      btn.disabled = true;
+      const area = document.getElementById('tarefas-form-area');
+      area.innerHTML = '<div class="loading">Preparando sorteio...</div>';
+      try {
+        const { questions, assignments, hidden } = await distributeQuestions(org, repo, msg => {
+          area.innerHTML = `<div class="loading">${msg}</div>`;
+        });
+        const novas = assignments.filter(a => a.status === 'nova').length;
+        const erros = assignments.filter(a => a.status === 'erro');
+        const label = { nova: 'Sorteada agora', existente: 'Já tinha', erro: 'Erro' };
+        const forkLink = a => `<a href="${giteaUrl}/${a.login}/${a.forkName}" target="_blank" rel="noopener">${a.login}</a>`;
+        const repeated = assignments.filter(a => a.questionId).length > questions.length;
+        area.innerHTML = `
+          <div class="${erros.length ? 'error-msg' : 'success-msg'}">
+            ${assignments.length === 0 ? 'Nenhum aluno aceitou esta tarefa ainda.' : `${novas} questão(ões) sorteada(s) agora; ${assignments.length - novas - erros.length} aluno(s) já tinham questão${erros.length ? `; ${erros.length} erro(s)` : ''}.`}
+            ${repeated ? `<br>Há mais alunos que questões (${questions.length}): algumas questões se repetem, de forma equilibrada.` : ''}
+            ${hidden ? `<br>${hidden} fork(s) privado(s) sem acesso do professor ficaram de fora — use "Fixar acesso" em Acompanhamento e sorteie de novo.` : ''}
+          </div>
+          ${assignments.length ? `<table style="margin-top:12px">
+            <thead><tr><th>Aluno</th><th>Questão</th><th>Situação</th></tr></thead>
+            <tbody>${assignments.map(a => `<tr>
+              <td>${forkLink(a)}</td>
+              <td class="mono">${a.questionId || '—'}</td>
+              <td>${label[a.status]}${a.error ? `: <small>${a.error}</small>` : ''}</td>
+            </tr>`).join('')}</tbody>
+          </table>` : ''}`;
+      } catch (err) {
+        area.innerHTML = `<div class="error-msg">Erro no sorteio: ${err.message}</div>`;
+      }
+      btn.disabled = false;
     };
 
     window.copyTaskLink = function(owner, repo, btn) {

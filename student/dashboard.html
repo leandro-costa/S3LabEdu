@@ -18,7 +18,7 @@
   <main class="app-main app-main--narrow" id="dashboard-content"></main>
 
   <script type="module">
-    import { requireAuth, displayUserInfo, getDisplayUrl, buildForkName, createForkSafe, createDeliveryIssue, getTaskReposForOrg, listOrganizations, listOrgRepos, getRepoTopics, checkFork, enableRepoIssues, addRepoCollaborator, listOrgOwners, listUserRepos, countCommitsSince, listRepoTags } from '../components/gitea-api.js';
+    import { requireAuth, displayUserInfo, getDisplayUrl, acceptTask as acceptTaskFork, getTaskReposForOrg, listOrganizations, listOrgRepos, getRepoTopics, checkFork, listUserRepos, countCommitsSince, listRepoTags } from '../components/gitea-api.js';
 
     await requireAuth();
 
@@ -358,22 +358,12 @@
       btn.textContent = 'Aceitando...';
 
       try {
-        const fork = await createForkSafe(owner, repo, buildForkName(owner, giteaUser, repo));
+        const fork = await acceptTaskFork(owner, repo, giteaUser, deadline || null);
         if (fork === null) {
           result.innerHTML = '<div class="success-msg">Você já aceitou esta tarefa.</div>';
           btn.disabled = false;
           btn.textContent = 'Aceitar tarefa';
           return;
-        }
-        const forkName = fork.name;
-
-        await enableRepoIssues(fork.owner.login, forkName).catch(() => {});
-        const owners = await listOrgOwners(owner);
-        for (const prof of owners) {
-          await addRepoCollaborator(fork.owner.login, forkName, prof.login, 'write').catch(() => {});
-        }
-        if (deadline) {
-          createDeliveryIssue(giteaUser, forkName, deadline);
         }
 
         result.innerHTML = '<div class="success-msg">Tarefa aceita com sucesso!</div>';
