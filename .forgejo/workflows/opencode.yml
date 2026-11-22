@@ -1,0 +1,80 @@
+name: opencode
+
+on:
+  issue_comment:
+    types: [created]
+  issues:
+    types: [opened]
+  pull_request_review_comment:
+    types: [created]
+  pull_request:
+    types: [opened]
+
+jobs:
+  opencode:
+    if: |
+      ((
+        (github.event.comment.body != '' && (
+          contains(github.event.comment.body, '/oc') ||
+          contains(github.event.comment.body, '/opencode') ||
+          contains(github.event.comment.body, '/opsx-propose') ||
+          contains(github.event.comment.body, '/opsx-apply') ||
+          contains(github.event.comment.body, '/opsx-explore')
+        )) ||
+        (github.event.issue.body != '' && (
+          contains(github.event.issue.body, '/oc') ||
+          contains(github.event.issue.body, '/opencode') ||
+          contains(github.event.issue.body, '/opsx-propose') ||
+          contains(github.event.issue.body, '/opsx-apply') ||
+          contains(github.event.issue.body, '/opsx-explore')
+        )) ||
+        (github.event.pull_request.body != '' && (
+          contains(github.event.pull_request.body, '/oc') ||
+          contains(github.event.pull_request.body, '/opencode') ||
+          contains(github.event.pull_request.body, '/opsx-propose') ||
+          contains(github.event.pull_request.body, '/opsx-apply') ||
+          contains(github.event.pull_request.body, '/opsx-explore')
+        ))
+      )) &&
+      github.actor != 'ssslabinhoBot'
+    runs-on: docker
+    permissions:
+      id-token: write
+      contents: write
+      pull-requests: write
+    env:
+      TOKEN: ${{ secrets.OPENCODE_TOKEN || secrets.GITHUB_TOKEN }}
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: https://github.com/actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.TOKEN }}
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq jq
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> $GITHUB_PATH
+          npm install -g @opencode-ai/plugin 2>&1 | tail -3
+          # Install openspec from clean directory to avoid local .npmrc interference
+          (cd /tmp && npm install -g @fission-ai/openspec@latest 2>&1)
+          echo "--- openspec install verification ---"
+          echo "which openspec: $(command -v openspec 2>/dev/null || echo 'not in PATH')"
+          openspec --version 2>&1 || echo "openspec --version failed"
+          echo "---" 
+
+      - name: Run opencode
+        shell: bash
+        run: bash .forgejo/workflows/opencode-forgejo-wrapper.sh
+        env:
+          TOKEN: ${{ secrets.OPENCODE_TOKEN || secrets.GITHUB_TOKEN }}
+          MODEL: opencode/deepseek-v4-flash-free
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          # EXTERNAL_URL: URL publica do Forgejo para links nos comentarios
+          # Exemplo: https://forgejo.s3lab.dpdns.org
+          # Se nao definido, usa GITHUB_SERVER_URL (que pode ser URL interna do Docker)
+          EXTERNAL_URL: ${{ vars.EXTERNAL_URL || secrets.EXTERNAL_URL || env.GITHUB_SERVER_URL }}

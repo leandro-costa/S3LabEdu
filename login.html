@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Login — IFBA</title>
+  <link rel="stylesheet" href="./css/academic.css" />
+  <link rel="stylesheet" href="./css/design-tokens.css" />
+</head>
+<body data-theme="bancada">
+  <div class="auth-layout">
+    <section class="auth-aside" aria-label="Sobre o sistema">
+      <div class="app-brand">
+        <span class="app-brand-mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#134E4A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6"/><path d="M10 3v6l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3"/><path d="M7.5 15h9"/></svg></span>
+        <span class="app-brand-name">S3Lab<span>Edu</span></span>
+      </div>
+      <div class="auth-pitch">
+        <h1>Tarefas de programação direto no Git da turma.</h1>
+        <p>O professor publica um repositório; cada aluno recebe o seu fork, trabalha nele e entrega com um comando.</p>
+      </div>
+      <div class="auth-terminal" aria-hidden="true">
+        <div><b>$</b> git clone …/sua-matricula/exercicio.git</div>
+        <div><b>$</b> entrega.bat</div>
+        <div class="ok">✓ Envio concluído no seu fork</div>
+      </div>
+    </section>
+
+    <main class="auth-main">
+      <div class="auth-box">
+        <h2>Acessar o sistema</h2>
+        <p>Faça login com sua conta Gitea para acessar o sistema.</p>
+
+        <div id="msg-area"></div>
+
+        <button class="btn btn-primary" onclick="startOAuth(this)">Entrar com Gitea</button>
+        <a href="index.html" class="btn btn-secondary">Voltar</a>
+
+        <!-- Configuração do Gitea (colapsada) -->
+        <details>
+          <summary>Configuração Gitea</summary>
+          <div class="form-group">
+            <label for="gitea-url-input">URL do Gitea</label>
+            <input type="url" id="gitea-url-input" value="https://s3lab.dpdns.org" />
+          </div>
+          <div class="form-group">
+            <label for="oauth-client-id-input">Client ID (OAuth)</label>
+            <input type="text" id="oauth-client-id-input" value="b154f8e5-81b9-4005-8c7e-7565528af90d" />
+          </div>
+          <p>
+            Crie um OAuth App no Gitea (Settings → Applications → OAuth2) com redirect_uri:<br>
+            <code id="redirect-uri-display"></code>
+          </p>
+        </details>
+        <p class="auth-note">Em computador compartilhado, saia ao terminar. Assim ninguém envia código com a sua conta.</p>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    function base64URLEncode(buffer) {
+      return btoa(String.fromCharCode(...new Uint8Array(buffer)))
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+    }
+
+    function generateRandomString(length) {
+      const array = new Uint8Array(length);
+      crypto.getRandomValues(array);
+      return base64URLEncode(array);
+    }
+
+    async function generatePKCE() {
+      const verifier = generateRandomString(64);
+      const encoder = new TextEncoder();
+      const digest = await crypto.subtle.digest('SHA-256', encoder.encode(verifier));
+      const challenge = base64URLEncode(digest);
+      return { verifier, challenge };
+    }
+
+    function getConfig() {
+      const urlInput = document.getElementById('gitea-url-input');
+      const clientInput = document.getElementById('oauth-client-id-input');
+      if (urlInput.value)    sessionStorage.setItem('gitea_url', urlInput.value.replace(/\/+$/, ''));
+      if (clientInput.value) sessionStorage.setItem('oauth_client_id', clientInput.value);
+      return {
+        gitea_url:   sessionStorage.getItem('gitea_url') || urlInput.value || '',
+        client_id:   sessionStorage.getItem('oauth_client_id') || '',
+      };
+    }
+
+    function getRedirectUri() {
+      const base = window.location.pathname.replace(/\/[^/]*$/, '');
+      return window.location.origin + base + '/oauth-callback.html';
+    }
+
+    function updateRedirectUriDisplay() {
+      const display = document.getElementById('redirect-uri-display');
+      if (display) {
+        display.textContent = getRedirectUri();
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      const params = new URLSearchParams(window.location.search);
+
+      const qsUrl = params.get('gitea_url');
+      const qsClientId = params.get('client_id');
+
+      const finalUrl = qsUrl || sessionStorage.getItem('gitea_url');
+      const finalClientId = qsClientId || sessionStorage.getItem('oauth_client_id');
+
+      if (finalUrl)       document.getElementById('gitea-url-input').value = finalUrl;
+      if (finalClientId)  document.getElementById('oauth-client-id-input').value = finalClientId;
+
+      if (qsUrl)      sessionStorage.setItem('gitea_url', qsUrl.replace(/\/+$/, ''));
+      if (qsClientId) sessionStorage.setItem('oauth_client_id', qsClientId);
+
+      updateRedirectUriDisplay();
+    });
+
+    async function startOAuth(btn) {
+      btn.disabled = true;
+      const msgArea = document.getElementById('msg-area');
+      msgArea.innerHTML = '';
+
+      const config = getConfig();
+      if (!config.client_id) {
+        msgArea.innerHTML = '<div class="error-msg">Configure o Client ID do OAuth App do Gitea nas configurações abaixo.</div>';
+        btn.disabled = false;
+        return;
+      }
+
+      try {
+        const { verifier, challenge } = await generatePKCE();
+        const state = generateRandomString(16);
+        const redirectUri = getRedirectUri();
+
+        sessionStorage.setItem('oauth_state_' + state, JSON.stringify({
+          verifier,
+          redirect_uri: redirectUri,
+          gitea_url: config.gitea_url,
+          client_id: config.client_id,
+        }));
+
+        const authorizeUrl = new URL(config.gitea_url + '/login/oauth/authorize');
+        authorizeUrl.searchParams.set('client_id', config.client_id);
+        authorizeUrl.searchParams.set('redirect_uri', redirectUri);
+        authorizeUrl.searchParams.set('response_type', 'code');
+        authorizeUrl.searchParams.set('state', state);
+        authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+        authorizeUrl.searchParams.set('code_challenge', challenge);
+
+        window.location.href = authorizeUrl.toString();
+      } catch (err) {
+        msgArea.innerHTML = '<div class="error-msg">Erro ao iniciar autenticação: ' + err.message + '</div>';
+        btn.disabled = false;
+      }
+    }
+  </script>
+</body>
+</html>

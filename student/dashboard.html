@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard — Aluno — IFBA</title>
+  <link rel="stylesheet" href="../css/academic.css" />
+  <link rel="stylesheet" href="../css/design-tokens.css" />
+  <script type="module" src="../components/ui-date.js"></script>
+  <script type="module" src="../components/ui-status-badge.js"></script>
+  <script type="module" src="../components/ui-inline.js"></script>
+  <script type="module" src="../components/gitea-api.js"></script>
+  <script type="module" src="../components/page-header.js"></script>
+  <script type="module" src="../components/tab-nav.js"></script>
+</head>
+<body data-theme="bancada">
+  <page-header role="student" title="Aluno"></page-header>
+  <main class="app-main app-main--narrow" id="dashboard-content"></main>
+
+  <script type="module">
+    import { requireAuth, displayUserInfo, getDisplayUrl, buildForkName, createForkSafe, createDeliveryIssue, getTaskReposForOrg, listOrganizations, listOrgRepos, getRepoTopics, checkFork, enableRepoIssues, addRepoCollaborator, listOrgOwners, listUserRepos, countCommitsSince, listRepoTags } from '../components/gitea-api.js';
+
+    await requireAuth();
+
+    const giteaUser = sessionStorage.getItem('student_gitea_user');
+
+    displayUserInfo('student');
+
+    const CACHE_KEY_ORGS = 'student_orgs_cache';
+    const CACHE_KEY_TASKS = 'student_tasks_cache';
+
+    async function loadStudentOrgs() {
+      try {
+        const orgs = await listOrganizations();
+        sessionStorage.setItem(CACHE_KEY_ORGS, JSON.stringify(orgs));
+        return orgs;
+      } catch (e) {
+        return JSON.parse(sessionStorage.getItem(CACHE_KEY_ORGS) || '[]');
+      }
+    }
+
+    async function loadTasksForOrgs(orgs) {
+      const taskRepos = [];
+      for (const org of orgs) {
+        try {
+          const repos = await listOrgRepos(org.username);
+          for (const r of (repos || [])) {
+            try {
+              const topics = await getRepoTopics(org.username, r.name);
+              if (topics.includes('type-task')) {
+                const deadline = topics.find(t => t.startsWith('deadline-'));
+                taskRepos.push({
+                  name: r.name,
+                  description: r.description || '',
+                  deadline: deadline ? deadline.replace('deadline-', '') : null,
+                  repoOwner: org.username,
+                  repoName: r.name,
+                  orgName: org.username,
+                });
+              }
+            } catch (_) {}
+          }
+        } catch (_) {}
+      }
+      sessionStorage.setItem(CACHE_KEY_TASKS, JSON.stringify(taskRepos));
+      return taskRepos;
+    }
+
+    async function getAcceptedRepoNames() {
+      const orgs = await loadStudentOrgs();
+      const accepted = new Set();
+      for (const org of orgs) {
+        try {
+          const repos = await listOrgRepos(org.username);
+          for (const r of (repos || [])) {
+            try {
+              const topics = await getRepoTopics(org.username, r.name);
+              if (topics.includes('type-task')) {
+                const fork = await checkFork(org.username, r.name, giteaUser);
+                if (fork) accepted.add(org.username + '/' + r.name);
+              }
+            } catch (_) {}
+          }
+        } catch (_) {}
+      }
+      return accepted;
+    }
+
+    async function getMyAcceptedTasks() {
+      const accepted = [];
+      try {
+        const allRepos = await listUserRepos();
+        const forks = allRepos.filter(r => r.fork && r.owner && r.owner.login === giteaUser);
+        for (const fork of forks) {
+          const parent = fork.parent;
+          if (!parent || !parent.owner) continue;
+          try {
+            const topics = await getRepoTopics(parent.owner.login, parent.name);
+            if (topics.includes('type-task')) {
+              const deadline = topics.find(t => t.startsWith('deadline-'));
+              accepted.push({
+                taskName: parent.name,
+                taskDescription: parent.description || '',
+                repoOwner: parent.owner.login,
+                repoName: parent.name,
+                deadline: deadline ? deadline.replace('deadline-', '') : null,
+                forkOwner: giteaUser,
+                forkName: fork.name,
+                forkCreatedAt: fork.created_at,
+                orgName: parent.owner.login,
+              });
+            }
+          } catch (_) {}
+        }
+      } catch (_) {}
+      return accepted;
+    }
+
+    const CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5 9-10"/></svg>';
+
+    function deadlineEnd(deadline) {
+      return new Date(deadline + 'T23:59:59');
+    }
+
+    function formatDayMonth(deadline) {
+      return new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'short' }).format(new Date(deadline + 'T12:00:00')).replace('.', '');
+    }
+
+    function daysLeft(deadline) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      return Math.round((new Date(deadline + 'T00:00:00') - today) / 86400000);
+    }
+
+    function taskKey(t) {
+      return `${t.orgName}-${t.repoName}`;
+    }
+
+    // Próxima entrega: tarefa aceita com o prazo futuro mais próximo
+    function pickNextTask(acceptedTasks) {
+      const now = new Date();
+      return acceptedTasks
+        .filter(t => t.deadline && deadlineEnd(t.deadline) >= now)
+        .sort((a, b) => a.deadline.localeCompare(b.deadline))[0] || null;
+    }
+
+    function heroHtml(t) {
+      if (!t) return '';
+      const giteaUrl = getDisplayUrl();
+      const cloneUrl = `${giteaUrl}/${giteaUser}/${t.forkName}.git`;
+      const d = daysLeft(t.deadline);
+      const countLabel = d <= 0 ? 'Hoje' : d === 1 ? '1 dia' : `${d} dias`;
+      return `
+        <section class="hero-task" aria-labelledby="hero-h">
+          <div class="hero-task-side">
+            <span class="hero-task-kicker">Próxima entrega</span>
+            <h2 class="hero-task-name" id="hero-h">${t.taskName}</h2>
+            <div class="hero-task-count"><strong>${countLabel}</strong><span>até ${formatDayMonth(t.deadline)}, 23:59</span></div>
+            <p id="hero-commits">Verificando commits no seu fork…</p>
+          </div>
+          <div class="hero-task-steps">
+            <h3>Como entregar</h3>
+            <ol class="steps">
+              <li>
+                <span class="step-mark step-mark--done">${CHECK_ICON}</span>
+                <div class="step-body"><span class="step-title">Tarefa aceita — seu fork foi criado</span><span class="step-hint">O professor já tem acesso para acompanhar.</span></div>
+              </li>
+              <li>
+                <span class="step-mark step-mark--current">2</span>
+                <div class="step-body">
+                  <span class="step-title">Clone o <strong>seu fork</strong>, não o repositório da turma</span>
+                  <div class="copy-field">
+                    <label for="clone-url" class="visually-hidden">Endereço do seu fork</label>
+                    <input id="clone-url" type="text" readonly value="${cloneUrl}" />
+                    <button type="button" class="btn btn-sm btn-secondary" id="copy-clone">Copiar</button>
+                  </div>
+                  <span class="step-hint">O endereço começa com <span class="mono">${giteaUser}/</span>. Se começar com <span class="mono">${t.orgName}/</span>, é o repositório original.</span>
+                </div>
+              </li>
+              <li>
+                <span class="step-mark">3</span>
+                <div class="step-body"><span class="step-title">Rode <span class="mono">entrega.bat</span> na pasta do projeto</span><span class="step-hint">Ele faz o commit, envia para o seu fork e limpa a máquina do laboratório.</span></div>
+              </li>
+            </ol>
+          </div>
+        </section>`;
+    }
+
+    function acceptedTasksSectionHtml(acceptedTasks) {
+      if (acceptedTasks.length === 0) {
+        return '<section aria-labelledby="accepted-h"><div class="section-header"><h2 id="accepted-h">Tarefas aceitas</h2></div><div class="empty-state"><p>Você ainda não aceitou nenhuma tarefa.</p></div></section>';
+      }
+      const giteaUrl = getDisplayUrl();
+      return `
+        <section aria-labelledby="accepted-h">
+          <div class="section-header"><h2 id="accepted-h">Tarefas aceitas</h2></div>
+          <div class="task-cards">${acceptedTasks.map(t => `
+            <article class="task-card">
+              <div class="task-card-head">
+                <h3>${t.taskName}</h3>
+                <span id="status-${taskKey(t)}"><span class="skeleton"></span></span>
+              </div>
+              ${t.taskDescription ? `<p class="task-card-desc">${t.taskDescription}</p>` : ''}
+              <dl>
+                <div><dt>Prazo</dt><dd>${t.deadline ? formatDayMonth(t.deadline) : 'Sem prazo'}</dd></div>
+                <div><dt>Commits</dt><dd class="num" id="commits-${taskKey(t)}"><span class="skeleton"></span></dd></div>
+                <div><dt>Coleta</dt><dd id="collect-${taskKey(t)}"><span class="skeleton"></span></dd></div>
+              </dl>
+              <div class="task-card-actions">
+                <a class="btn btn-primary" id="repo-${taskKey(t)}" href="${giteaUrl}/${giteaUser}/${t.forkName}" target="_blank" rel="noopener">Abrir meu fork</a>
+              </div>
+              <span class="task-card-desc mono">${t.orgName}</span>
+            </article>`
+          ).join('')}</div>
+        </section>`;
+    }
+
+    async function populateAcceptedTaskRows(acceptedTasks, nextTask) {
+      for (const t of acceptedTasks) {
+        const statusCell = document.getElementById(`status-${taskKey(t)}`);
+        if (!statusCell) continue;
+
+        const commitsCell = document.getElementById(`commits-${taskKey(t)}`);
+        let count = 0;
+        try {
+          count = await countCommitsSince(giteaUser, t.forkName, t.forkCreatedAt);
+          commitsCell.textContent = count;
+        } catch (_) { commitsCell.textContent = '-'; }
+
+        statusCell.innerHTML = count > 0
+          ? '<ui-status-badge status="entregue"></ui-status-badge>'
+          : '<ui-status-badge status="aceita" label="Em andamento"></ui-status-badge>';
+
+        if (nextTask && taskKey(nextTask) === taskKey(t)) {
+          const hero = document.getElementById('hero-commits');
+          if (hero) hero.textContent = count === 0
+            ? 'Nenhum commit seu no fork ainda.'
+            : `${count} commit${count > 1 ? 's' : ''} seu${count > 1 ? 's' : ''} no fork.`;
+        }
+
+        const collectCell = document.getElementById(`collect-${taskKey(t)}`);
+        if (collectCell) {
+          try {
+            const tags = await listRepoTags(giteaUser, t.forkName);
+            const collectTags = (Array.isArray(tags) ? tags : []).filter(tg => tg.name.startsWith('coleta-'));
+            if (collectTags.length > 0) {
+              const latest = collectTags.sort((a, b) => b.name.localeCompare(a.name))[0];
+              collectCell.textContent = latest.name.replace('coleta-', '').substring(0, 10);
+            } else {
+              collectCell.textContent = '—';
+            }
+          } catch (_) { collectCell.textContent = '-'; }
+        }
+      }
+    }
+
+    function setupCopyButton() {
+      const btn = document.getElementById('copy-clone');
+      const input = document.getElementById('clone-url');
+      if (!btn || !input) return;
+      btn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(input.value);
+        } catch (_) {
+          input.select();
+          document.execCommand('copy');
+        }
+        btn.textContent = 'Copiado';
+        setTimeout(() => { btn.textContent = 'Copiar'; }, 2000);
+      });
+    }
+
+    function pageTitleHtml(orgs, acceptedTasks) {
+      const orgNames = orgs.map(o => `<span class="mono">${o.username}</span>`).join(', ');
+      return `
+        <div class="page-title">
+          <div class="page-title-text">
+            <h1>Minhas tarefas</h1>
+            <p>${acceptedTasks.length} tarefa(s) aceita(s)${orgs.length ? ` · ${orgs.length === 1 ? 'turma' : 'turmas'} ${orgNames}` : ''}</p>
+          </div>
+        </div>`;
+    }
+
+    async function render() {
+      const container = document.getElementById('dashboard-content');
+      const orgs = await loadStudentOrgs();
+      const acceptedTasks = await getMyAcceptedTasks();
+      const nextTask = pickNextTask(acceptedTasks);
+
+      if (orgs.length === 0) {
+        container.innerHTML = pageTitleHtml(orgs, acceptedTasks)
+          + `<div class="empty-state"><p>Você ainda não está em nenhuma turma. Peça ao professor para incluir a sua conta <span class="mono">${giteaUser}</span> na turma.</p></div>`
+          + heroHtml(nextTask)
+          + acceptedTasksSectionHtml(acceptedTasks);
+        setupCopyButton();
+        populateAcceptedTaskRows(acceptedTasks, nextTask);
+        return;
+      }
+
+      const allTasks = await loadTasksForOrgs(orgs);
+      const acceptedRepoNames = await getAcceptedRepoNames();
+
+      container.innerHTML = `
+        ${pageTitleHtml(orgs, acceptedTasks)}
+        ${heroHtml(nextTask)}
+        <section aria-labelledby="available-h">
+          <div class="section-header"><h2 id="available-h">Disponíveis para aceitar</h2></div>
+          <div id="available-tasks-area"></div>
+        </section>
+        ${acceptedTasksSectionHtml(acceptedTasks)}
+      `;
+
+      setupCopyButton();
+      renderAvailableTasks(allTasks, acceptedRepoNames);
+      populateAcceptedTaskRows(acceptedTasks, nextTask);
+    }
+
+    function renderAvailableTasks(allTasks, acceptedRepoNames) {
+      const area = document.getElementById('available-tasks-area');
+      const now = new Date();
+      const availableTasks = allTasks.filter(t =>
+        !acceptedRepoNames.has(t.repoOwner + '/' + t.repoName) &&
+        (!t.deadline || new Date(t.deadline + 'T23:59:59') >= now)
+      );
+
+      if (availableTasks.length === 0) {
+        area.innerHTML = '<div class="empty-state"><p>Nenhuma tarefa nova para aceitar no momento.</p></div>';
+        return;
+      }
+
+      area.innerHTML = `
+        <div id="accept-result"></div>
+        <div class="task-cards">${availableTasks.map(t => `
+          <article class="task-card task-card--available">
+            <div class="task-card-head">
+              <h3>${t.name}</h3>
+              <ui-status-badge status="pendente" label="Não aceita"></ui-status-badge>
+            </div>
+            ${t.description ? `<p class="task-card-desc">${t.description}</p>` : ''}
+            <dl>
+              <div><dt>Prazo</dt><dd>${t.deadline ? formatDayMonth(t.deadline) : 'Sem prazo'}</dd></div>
+              <div><dt>Turma</dt><dd class="mono">${t.repoOwner}</dd></div>
+            </dl>
+            <p class="task-card-desc">Aceitar cria uma cópia (fork) na sua conta, onde você vai trabalhar e entregar.</p>
+            <div class="task-card-actions">
+              <button class="btn btn-dark accept-btn" data-owner="${t.repoOwner}" data-repo="${t.repoName}" data-taskname="${t.name}" data-deadline="${t.deadline || ''}">Aceitar tarefa</button>
+            </div>
+          </article>`
+        ).join('')}</div>
+      `;
+      area.querySelectorAll('.accept-btn').forEach(btn => {
+        btn.addEventListener('click', () => acceptTask(btn.dataset.owner, btn.dataset.repo, btn.dataset.taskname, btn.dataset.deadline, btn));
+      });
+    }
+
+    window.acceptTask = async function(owner, repo, taskName, deadline, btn) {
+      const result = document.getElementById('accept-result');
+      btn.disabled = true;
+      btn.textContent = 'Aceitando...';
+
+      try {
+        const fork = await createForkSafe(owner, repo, buildForkName(owner, giteaUser, repo));
+        if (fork === null) {
+          result.innerHTML = '<div class="success-msg">Você já aceitou esta tarefa.</div>';
+          btn.disabled = false;
+          btn.textContent = 'Aceitar tarefa';
+          return;
+        }
+        const forkName = fork.name;
+
+        await enableRepoIssues(fork.owner.login, forkName).catch(() => {});
+        const owners = await listOrgOwners(owner);
+        for (const prof of owners) {
+          await addRepoCollaborator(fork.owner.login, forkName, prof.login, 'write').catch(() => {});
+        }
+        if (deadline) {
+          createDeliveryIssue(giteaUser, forkName, deadline);
+        }
+
+        result.innerHTML = '<div class="success-msg">Tarefa aceita com sucesso!</div>';
+        render();
+      } catch (err) {
+        result.innerHTML = `<div class="error-msg">Erro: ${err.message || 'Erro desconhecido'}</div>`;
+        btn.disabled = false;
+        btn.textContent = 'Aceitar tarefa';
+      }
+    };
+
+    render();
+  </script>
+</body>
+</html>

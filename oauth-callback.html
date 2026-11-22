@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Autenticação — IFBA</title>
+  <link rel="stylesheet" href="./css/academic.css" />
+  <link rel="stylesheet" href="./css/design-tokens.css" />
+</head>
+<body data-theme="bancada">
+  <div class="container" style="padding:80px 24px;text-align:center">
+    <div id="status" style="max-width:480px;margin:0 auto">
+      <div class="loading" style="font-size:1.1rem;margin-bottom:16px">Processando autenticação...</div>
+    </div>
+  </div>
+
+  <script>
+    (async function() {
+      const statusEl = document.getElementById('status');
+
+      function showError(msg) {
+        statusEl.innerHTML = '<div class="error-msg">' + msg + '<br><br><a href="index.html" class="btn btn-secondary" style="text-decoration:none">Voltar ao início</a></div>';
+      }
+
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get('code');
+        const state = params.get('state');
+
+        // Se o Gitea redirecionou com erro na URL
+        const error  = params.get('error');
+        const errorDesc = params.get('error_description');
+        if (error) {
+          showError('Gitea retornou erro: ' + (errorDesc || error));
+          return;
+        }
+
+        if (!code || !state) {
+          showError('Parâmetros de autenticação inválidos. Certifique-se de que o redirect_uri no Gitea está configurado corretamente para esta página.');
+          return;
+        }
+
+        // Recuperar dados salvos antes do redirect (PKCE verifier, config)
+        const storedRaw = sessionStorage.getItem('oauth_state_' + state);
+        sessionStorage.removeItem('oauth_state_' + state);
+
+        if (!storedRaw) {
+          showError('Sessão expirada ou inválida (state não encontrado). Faça login novamente.');
+          return;
+        }
+
+        const stored = JSON.parse(storedRaw);
+        const { verifier, redirect_uri, gitea_url, client_id } = stored;
+
+        // Trocar código de autorização por tokens via POST direto ao Gitea
+        // Requer CORS habilitado no Gitea (app.ini: [cors] ENABLED = true)
+        const tokenRes = await fetch(gitea_url + '/login/oauth/access_token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: client_id,
+            code: code,
+            redirect_uri: redirect_uri,
+            grant_type: 'authorization_code',
+            code_verifier: verifier,
+          }),
+        });
+
+        if (!tokenRes.ok) {
+          const text = await tokenRes.text();
+          showError('Falha na autenticação (' + tokenRes.status + '): ' + (text.slice(0, 300) || 'resposta vazia'));
+          return;
+        }
+
+        // Gitea pode retornar JSON ou form-urlencoded
+        let tokenData;
+        const ct = tokenRes.headers.get('content-type') || '';
+        if (ct.includes('application/json')) {
+          tokenData = await tokenRes.json();
+        } else {
+          const text = await tokenRes.text();
+          const sp = new URLSearchParams(text);
+          tokenData = Object.fromEntries(sp);
+        }
+
+        if (tokenData.error) {
+          showError('Erro do Gitea: ' + (tokenData.error_description || tokenData.error));
+          return;
+        }
+
+        if (!tokenData.access_token) {
+          showError('Resposta inválida do Gitea: token de acesso não recebido.');
+          return;
+        }
+
+        // Salvar tokens no sessionStorage
+        sessionStorage.setItem('oauth_access_token', tokenData.access_token);
+        sessionStorage.setItem('oauth_refresh_token', tokenData.refresh_token || '');
+        sessionStorage.setItem('oauth_token_expiry', String(Date.now() + (tokenData.expires_in || 3600) * 1000));
+        sessionStorage.setItem('gitea_base_url', gitea_url + '/api/v1');
+        sessionStorage.setItem('gitea_url', gitea_url);
+
+        // Obter informações do usuário via API do Gitea
+        const userRes = await fetch(gitea_url + '/api/v1/user', {
+          headers: { 'Authorization': 'Bearer ' + tokenData.access_token },
+        });
+
+        let isStudent = true;
+        let apiUsername = '';
+        let apiEmail = '';
+        let apiFullName = '';
+
+        if (userRes.ok) {
+          const user = await userRes.json();
+          apiUsername = user.login || '';
+          apiEmail = user.email || '';
+          apiFullName = user.full_name || '';
+        }
+
+        // Determina papel: dono de org → professor, senão → aluno
+        if (apiUsername) {
+          try {
+            const orgsRes = await fetch(gitea_url + '/api/v1/user/orgs', {
+              headers: { 'Authorization': 'Bearer ' + tokenData.access_token },
+            });
+            if (orgsRes.ok) {
+              const orgs = await orgsRes.json();
+              if (orgs && orgs.length > 0) {
+                isStudent = true; // default: se tiver orgs mas não for dono → aluno
+                for (const org of orgs) {
+                  const orgName = org.username || org.name;
+                  const teamsRes = await fetch(gitea_url + '/api/v1/orgs/' + encodeURIComponent(orgName) + '/teams', {
+                    headers: { 'Authorization': 'Bearer ' + tokenData.access_token },
+                  });
+                  if (teamsRes.ok) {
+                    const teams = await teamsRes.json();
+                    const ownersTeam = teams.find(t => t.name.toLowerCase() === 'owners');
+                    if (ownersTeam) {
+                      const memberRes = await fetch(gitea_url + '/api/v1/teams/' + ownersTeam.id + '/members/' + encodeURIComponent(apiUsername), {
+                        headers: { 'Authorization': 'Bearer ' + tokenData.access_token },
+                      });
+                      if (memberRes.ok) {
+                        isStudent = false; // é dono de pelo menos uma org → professor
+                        break;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } catch (_) {
+            // fallback: se falhar, assume aluno
+            isStudent = true;
+          }
+        }
+
+        // Usar dados da API do Gitea (não há mais fallback para formulário)
+        const finalEmail  = apiEmail || '';
+        const finalUser   = apiUsername || '';
+
+        const finalFullName = apiFullName || '';
+
+        // Salvar dados específicos do papel, redirecionar e avisar outras abas
+        if (isStudent) {
+          if (finalEmail)     sessionStorage.setItem('student_email', finalEmail);
+          if (finalUser)      sessionStorage.setItem('student_gitea_user', finalUser);
+          if (finalFullName)  sessionStorage.setItem('student_full_name', finalFullName);
+        } else {
+          if (finalEmail)     sessionStorage.setItem('teacher_email', finalEmail);
+          if (finalUser)      sessionStorage.setItem('teacher_gitea_user', finalUser);
+          if (finalFullName)  sessionStorage.setItem('teacher_full_name', finalFullName);
+        }
+        // Avisa outras abas sobre o login
+        try { new BroadcastChannel('s3lab-auth').postMessage({
+          type: 'auth-data',
+          payload: Object.fromEntries(
+            ['oauth_access_token','oauth_refresh_token','oauth_token_expiry','gitea_url','gitea_base_url','oauth_client_id',
+             isStudent ? 'student_email' : 'teacher_email',
+             isStudent ? 'student_gitea_user' : 'teacher_gitea_user',
+             isStudent ? 'student_full_name' : 'teacher_full_name']
+              .map(k => [k, sessionStorage.getItem(k)]).filter(([_,v]) => v)
+          )
+        }); } catch (_) {}
+        window.location.href = isStudent ? 'student/dashboard.html' : 'teacher/turmas.html';
+      } catch (err) {
+        const msg = err.message || 'Erro desconhecido';
+        if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CORS')) {
+          showError('Erro de conexão com o Gitea. Verifique:<br>1. O Gitea está rodando<br>2. CORS está habilitado no Gitea (app.ini: [cors] ENABLED = true)<br>3. A URL do Gitea está correta');
+        } else {
+          showError('Erro de autenticação: ' + msg.replace(/</g, '&lt;'));
+        }
+      }
+    })();
+  </script>
+</body>
+</html>

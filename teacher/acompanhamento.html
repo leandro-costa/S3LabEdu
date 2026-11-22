@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Acompanhamento — Professor — IFBA</title>
+  <link rel="stylesheet" href="../css/academic.css" />
+  <link rel="stylesheet" href="../css/design-tokens.css" />
+  <script type="module" src="../components/ui-status-badge.js"></script>
+  <script type="module" src="../components/ui-inline.js"></script>
+  <script type="module" src="../components/ui-date.js"></script>
+  <script src="../components/page-header.js" type="module"></script>
+  <script src="../components/tab-nav.js" type="module"></script>
+  <script type="module" src="../components/gitea-api.js"></script>
+</head>
+<body data-theme="bancada">
+  <page-header role="teacher" title="Professor"></page-header>
+  <div class="app-shell">
+    <tab-nav role="teacher" active="acompanhamento"></tab-nav>
+    <main class="app-main" id="acompanhamento-content"></main>
+  </div>
+
+  <script type="module">
+    import { listForks, countCommitsSince, ensureAlunosTeam, listTeamMembers, requireAuth, displayUserInfo, loadOwnerOrgs, getTaskReposForOrg, listRepoTags, listOrgOwners, addRepoCollaborator, getRepo, getBaseUrl, getToken, getDisplayUrl, buildForkName } from '../components/gitea-api.js';
+    import { getSelectedOrg, setSelectedOrg, orgSelectHtml } from '../components/org-filter.js';
+
+    await requireAuth();
+    displayUserInfo('teacher');
+
+    async function render() {
+      const container = document.getElementById('acompanhamento-content');
+      const ownerOrgs = await loadOwnerOrgs();
+      const giteaUrl = getDisplayUrl();
+
+      if (ownerOrgs.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p>Nenhuma turma cadastrada.</p></div>';
+        return;
+      }
+
+      const filterOrg = getSelectedOrg(ownerOrgs);
+      const filterTask = new URLSearchParams(window.location.search).get('task') || 'all';
+
+      let orgsToShow = ownerOrgs;
+      if (filterOrg !== 'all') orgsToShow = orgsToShow.filter(o => o.username === filterOrg);
+
+      let allTaskRepos = [];
+      for (const org of ownerOrgs) {
+        const tasks = await getTaskReposForOrg(org.username);
+        allTaskRepos = allTaskRepos.concat(tasks.map(t => ({ ...t, orgName: org.username })));
+      }
+
+      let filteredTasks = allTaskRepos;
+      if (filterOrg !== 'all') filteredTasks = filteredTasks.filter(t => t.repoOwner === filterOrg);
+      if (filterTask !== 'all') filteredTasks = filteredTasks.filter(t => t.repoName === filterTask);
+
+      const nextDeadline = filteredTasks
+        .filter(t => t.deadline && deadlineEnd(t.deadline) >= new Date())
+        .sort((a, b) => a.deadline.localeCompare(b.deadline))[0];
+
+      container.innerHTML = `
+        <div class="page-title">
+          <div class="page-title-text">
+            <h1>Acompanhamento</h1>
+            <p id="track-subtitle">${filterOrg === 'all' ? 'Todas as turmas' : `<span class="mono">${filterOrg}</span>`} · ${filteredTasks.length} tarefa(s)</p>
+          </div>
+        </div>
+        <div class="filters">
+          ${orgSelectHtml({ id: 'track-org', orgs: ownerOrgs, selected: filterOrg, label: 'Turma' })}
+          <div class="form-group">
+            <label for="track-task">Tarefa</label>
+            <select id="track-task" onchange="taskChanged(this)">
+              <option value="all">Todas as tarefas</option>
+              ${allTaskRepos.filter(t => filterOrg === 'all' || t.repoOwner === filterOrg).map(t => `<option value="${t.repoName}" ${t.repoName === filterTask ? 'selected' : ''}>${t.name}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        ${filteredTasks.length === 0 ? '<div class="empty-state"><p>Nenhuma tarefa encontrada.</p></div>' : `
+        <div class="kpi-grid">
+          <div class="kpi"><span class="kpi-label">Alunos matriculados</span><span class="kpi-value num" id="kpi-enrolled"><span class="skeleton"></span></span></div>
+          <div class="kpi"><span class="kpi-label">Tarefas aceitas (forks)</span><span class="kpi-value num" id="kpi-accepted"><span class="skeleton"></span></span></div>
+          <div class="kpi"><span class="kpi-label">Entregas (com commits do aluno)</span><span class="kpi-value num" id="kpi-delivered"><span class="skeleton"></span></span></div>
+          <div class="kpi"><span class="kpi-label">Próximo prazo</span>
+            ${nextDeadline
+              ? `<span class="kpi-value kpi-value--sm">${formatDayMonth(nextDeadline.deadline)} · ${daysLeftLabel(nextDeadline.deadline)}</span><span class="kpi-sub">${nextDeadline.repoName}</span>`
+              : '<span class="kpi-value kpi-value--sm muted">Nenhum</span>'}
+          </div>
+        </div>
+        <section class="panel" aria-labelledby="tasks-h">
+          <div class="panel-header">
+            <h2 id="tasks-h">Tarefas</h2>
+            <div class="legend">
+              <span><i class="seg-done"></i>Entregaram</span>
+              <span><i class="seg-open"></i>Aceitaram, sem commits</span>
+              <span><i class="seg-none"></i>Não aceitaram</span>
+            </div>
+          </div>
+          ${filteredTasks.map(t => {
+            const key = `${t.repoOwner}-${t.repoName}`;
+            const detailUrl = `detalhes-tarefa.html?org=${t.repoOwner}&task=${t.repoName}`;
+            return `<div class="task-row" id="track-${key}">
+              <div class="task-row-main">
+                <a class="task-row-name" href="${detailUrl}">${t.name}</a>
+                <span class="task-row-meta">${deadlineMeta(t.deadline)} · <a href="${giteaUrl}/${t.repoOwner}/${t.repoName}" target="_blank" rel="noopener">${t.repoOwner}/${t.repoName}</a></span>
+                <span class="task-row-meta" id="collect-${key}">Coleta: …</span>
+              </div>
+              <div class="task-row-progress">
+                <div class="seg-bar" role="img" id="bar-${key}" aria-label="Carregando">
+                  <span class="seg-done" id="seg-done-${key}" style="width:0%"></span>
+                  <span class="seg-open" id="seg-open-${key}" style="width:0%"></span>
+                </div>
+                <div class="seg-counts">
+                  <span><strong class="num" id="delivered-${key}">…</strong> entregaram</span>
+                  <span><strong class="num" id="open-${key}">…</strong> sem commits</span>
+                  <span><strong class="num" id="notaccepted-${key}">…</strong> não aceitaram</span>
+                </div>
+              </div>
+              <div class="task-row-side">
+                ${deadlineBadge(t.deadline)}
+                <span id="pending-${key}"></span>
+                <a class="btn btn-sm btn-secondary" href="${detailUrl}">Detalhes</a>
+                <button id="fix-btn-${key}" class="btn btn-sm btn-secondary" style="display:none" onclick="fixForkAccess('${t.repoOwner}', '${t.repoName}', this)">Fixar acesso</button>
+              </div>
+            </div>`;
+          }).join('')}
+        </section>`}
+      `;
+
+      if (filteredTasks.length === 0) return;
+
+      const enrolledByOrg = {};
+      let totalAccepted = 0;
+      let totalDelivered = 0;
+      const setText = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+
+      for (const t of filteredTasks) {
+        const key = `${t.repoOwner}-${t.repoName}`;
+        const collectCell = document.getElementById(`collect-${key}`);
+        const pendingCell = document.getElementById(`pending-${key}`);
+        const bar = document.getElementById(`bar-${key}`);
+
+        try {
+          const repoInfo = await getRepo(t.repoOwner, t.repoName);
+          const forksCount = repoInfo?.forks_count ?? 0;
+
+          const team = await ensureAlunosTeam(t.repoOwner);
+          const members = await listTeamMembers(team.id);
+          const memberNames = new Set(members.map(m => m.login));
+          enrolledByOrg[t.repoOwner] = members.length;
+          setText('kpi-enrolled', Object.values(enrolledByOrg).reduce((a, b) => a + b, 0));
+          if (filterOrg !== 'all') {
+            const sub = document.getElementById('track-subtitle');
+            if (sub) sub.innerHTML = `<span class="mono">${filterOrg}</span> · ${members.length} alunos matriculados · ${filteredTasks.length} tarefa(s)`;
+          }
+
+          const forks = await listForks(t.repoOwner, t.repoName) || [];
+          const allForks = Array.isArray(forks) ? forks : [];
+          totalAccepted += allForks.length;
+          setText('kpi-accepted', totalAccepted);
+
+          const fixBtn = document.getElementById(`fix-btn-${key}`);
+          if (fixBtn) {
+            fixBtn.style.display = (forksCount > 0 && forksCount === allForks.length) ? 'none' : '';
+          }
+
+          const pendingForks = allForks.filter(f => f.owner && !memberNames.has(f.owner.login));
+          if (pendingCell && pendingForks.length > 0) {
+            pendingCell.innerHTML = `<span class="badge badge-warning">${pendingForks.length} fora da turma</span>`;
+          }
+
+          // A barra considera só os alunos da turma; forks de fora aparecem no selo "fora da turma"
+          let delivered = 0;
+          let collected = 0;
+          for (const f of allForks) {
+            try {
+              const count = await countCommitsSince(f.owner.login, f.name, f.created_at);
+              if (count > 0 && memberNames.has(f.owner.login)) delivered++;
+              const tags = await listRepoTags(f.owner.login, f.name);
+              if (tags.some(t => t.name.startsWith('coleta-'))) collected++;
+            } catch (_) {}
+          }
+          totalDelivered += delivered;
+          setText('kpi-delivered', totalDelivered);
+
+          const accepted = allForks.length;
+          const memberAccepted = accepted - pendingForks.length;
+          const base = Math.max(members.length, 1);
+          const open = Math.max(memberAccepted - delivered, 0);
+          const notAccepted = Math.max(members.length - memberAccepted, 0);
+          document.getElementById(`seg-done-${key}`).style.width = (delivered / base * 100) + '%';
+          document.getElementById(`seg-open-${key}`).style.width = (open / base * 100) + '%';
+          if (bar) bar.setAttribute('aria-label', `${delivered} entregaram, ${open} aceitaram sem commits, ${notAccepted} não aceitaram`);
+          setText(`delivered-${key}`, delivered);
+          setText(`open-${key}`, open);
+          setText(`notaccepted-${key}`, notAccepted);
+
+          if (collectCell) {
+            collectCell.textContent = collected === 0
+              ? 'Coleta: nenhuma'
+              : `Coleta: ${collected} de ${accepted} forks${collected === accepted ? '' : ' (incompleta)'}`;
+          }
+        } catch (_) {
+          ['delivered', 'open', 'notaccepted'].forEach(p => setText(`${p}-${key}`, '-'));
+          if (collectCell) collectCell.textContent = 'Coleta: -';
+          if (bar) bar.setAttribute('aria-label', 'Não foi possível carregar');
+        }
+      }
+    }
+
+    function deadlineEnd(deadline) {
+      return new Date(deadline + 'T23:59:59');
+    }
+
+    function formatDayMonth(deadline) {
+      return new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'short' }).format(new Date(deadline + 'T12:00:00')).replace('.', '');
+    }
+
+    function daysLeft(deadline) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const day = new Date(deadline + 'T00:00:00');
+      return Math.round((day - today) / 86400000);
+    }
+
+    function daysLeftLabel(deadline) {
+      const d = daysLeft(deadline);
+      if (d <= 0) return 'hoje';
+      if (d === 1) return 'amanhã';
+      return `em ${d} dias`;
+    }
+
+    function deadlineMeta(deadline) {
+      if (!deadline) return 'Sem prazo';
+      if (deadlineEnd(deadline) < new Date()) return `Prazo ${formatDayMonth(deadline)} · encerrado`;
+      return `Prazo ${formatDayMonth(deadline)} · ${daysLeftLabel(deadline)}`;
+    }
+
+    function deadlineBadge(deadline) {
+      if (!deadline) return '<span class="badge">Sem prazo</span>';
+      if (deadlineEnd(deadline) < new Date()) return '<span class="badge">Encerrada</span>';
+      return '<span class="badge badge-warning">Em andamento</span>';
+    }
+
+    async function findForksViaMembers(org, repo) {
+      const token = getToken();
+      const baseUrl = getBaseUrl();
+      const owners = await listOrgOwners(org);
+      const ownerLogins = new Set(owners.map(o => o.login));
+      const membersRes = await fetch(`${baseUrl}/orgs/${encodeURIComponent(org)}/members?limit=50`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!membersRes.ok) throw new Error(`Erro ao listar membros da org: ${membersRes.status}`);
+      const members = await membersRes.json();
+      const forks = [];
+      for (const m of members) {
+        if (ownerLogins.has(m.login)) continue;
+        // Padrão atual: {org}-{login}-{repo}; legado: {org}-{repo}
+        for (const forkName of [buildForkName(org, m.login, repo), `${org}-${repo}`]) {
+          const chk = await fetch(`${baseUrl}/repos/${encodeURIComponent(m.login)}/${encodeURIComponent(forkName)}`, {
+            headers: { 'Authorization': `Bearer ${token}` },
+          });
+          if (chk.ok) { forks.push({ owner: m.login, name: forkName }); break; }
+        }
+      }
+      return forks;
+    }
+
+    window.fixForkAccess = async function(org, repo, btn) {
+      btn.disabled = true;
+      btn.textContent = 'Fixando...';
+      try {
+        const owners = await listOrgOwners(org);
+        if (owners.length === 0) {
+          alert(`Nenhum owner encontrado na organização ${org}.`);
+          btn.disabled = false;
+          btn.textContent = 'Fixar Acesso';
+          return;
+        }
+        const forks = await findForksViaMembers(org, repo);
+        if (forks.length === 0) {
+          alert('Nenhum fork encontrado para fixar.');
+          btn.disabled = false;
+          btn.textContent = 'Fixar Acesso';
+          return;
+        }
+        let errors = [];
+        for (const f of forks) {
+          for (const owner of owners) {
+            try {
+              await addRepoCollaborator(f.owner, f.name, owner.login, 'write');
+            } catch (err) {
+              errors.push(`${f.owner}/${f.name} <- ${owner.login}: ${err.message || err}`);
+            }
+          }
+        }
+        if (errors.length > 0) {
+          console.error('Erros no Fixar Acesso:', errors);
+          alert(`Fixar Acesso concluído com ${errors.length} erro(s). Verifique o console.`);
+        }
+        btn.textContent = '✓ Fixado';
+        render();
+      } catch (err) {
+        alert('Erro ao fixar acesso: ' + (err.message || 'Erro desconhecido'));
+        btn.disabled = false;
+        btn.textContent = 'Fixar Acesso';
+      }
+    };
+
+    window.orgChanged = function(select) {
+      setSelectedOrg(select.value);
+      render();
+    };
+
+    window.taskChanged = function(select) {
+      const p = new URLSearchParams(window.location.search);
+      if (select.value === 'all') p.delete('task');
+      else p.set('task', select.value);
+      const qs = p.toString();
+      const url = qs ? '?' + qs : window.location.pathname;
+      history.replaceState(null, '', url);
+      window.dispatchEvent(new CustomEvent('org-changed'));
+      render();
+    };
+
+    window.render = render;
+
+    render();
+  </script>
+</body>
+</html>

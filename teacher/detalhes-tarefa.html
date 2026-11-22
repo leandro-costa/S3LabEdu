@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Detalhes da tarefa — Professor — IFBA</title>
+  <link rel="stylesheet" href="../css/academic.css" />
+  <link rel="stylesheet" href="../css/design-tokens.css" />
+  <script type="module" src="../components/ui-status-badge.js"></script>
+  <script type="module" src="../components/ui-date.js"></script>
+  <script src="../components/page-header.js" type="module"></script>
+  <script src="../components/tab-nav.js" type="module"></script>
+  <script type="module" src="../components/gitea-api.js"></script>
+</head>
+<body data-theme="bancada">
+  <page-header role="teacher" title="Professor"></page-header>
+  <div class="app-shell">
+    <tab-nav role="teacher" active="acompanhamento"></tab-nav>
+    <main class="app-main" id="detail-content"></main>
+  </div>
+
+  <script type="module">
+    import { listForks, countCommitsSince, ensureAlunosTeam, listTeamMembers, addTeamMember, deleteRepo, requireAuth, displayUserInfo, getDisplayUrl, listRepoIssues, listRepoTags } from '../components/gitea-api.js';
+
+    await requireAuth();
+    displayUserInfo('teacher');
+
+    const params = new URLSearchParams(window.location.search);
+    const repoOwner = params.get('org');
+    const repoName = params.get('task');
+
+    const backOrgParam = (() => {
+      const p = new URLSearchParams(window.location.search);
+      p.delete('task');
+      return p.toString() ? '?' + p.toString() : '';
+    })();
+
+    async function renderDetail() {
+      const container = document.getElementById('detail-content');
+
+      if (!repoOwner || !repoName) {
+        container.innerHTML = '<div class="error-msg">Parâmetros "org" e "task" são obrigatórios.</div>';
+        return;
+      }
+
+      const giteaUrl = getDisplayUrl();
+      const forks = await listForks(repoOwner, repoName) || [];
+      const allForks = Array.isArray(forks) ? forks : [];
+      const forkOwners = new Set(allForks.map(f => f.owner?.login).filter(Boolean));
+      const forkDateMap = {};
+      const forkNameMap = {};
+      for (const f of allForks) {
+        const login = f.owner?.login;
+        if (login) {
+          forkDateMap[login] = f.created_at;
+          forkNameMap[login] = f.name;
+        }
+      }
+
+      let team;
+      let members = [];
+      try {
+        team = await ensureAlunosTeam(repoOwner);
+        members = await listTeamMembers(team.id);
+      } catch (_) {}
+
+      const memberNames = new Set(members.map(m => m.login));
+
+      const dash = '<span class="muted">—</span>';
+      const loadingCell = '<span class="skeleton"></span>';
+      let rows = '';
+      for (const m of members) {
+        const username = m.login;
+        const displayName = m.full_name || username;
+        const hasFork = forkOwners.has(username);
+        const forkName = forkNameMap[username] || repoName;
+        const repoLink = hasFork
+          ? `<a href="${giteaUrl}/${username}/${forkName}" target="_blank" rel="noopener">Abrir fork</a>`
+          : '';
+        const memberDeleteBtn = hasFork ? `<button class="btn btn-sm btn-secondary" onclick="deleteFork('${username}', '${forkName}', this)">Excluir fork</button>` : '';
+        rows += `<tr data-status="${hasFork ? 'aceita' : 'naoaceitou'}" data-search="${(displayName + ' ' + username).toLowerCase()}">
+          <td>${displayName}<small>${username}</small></td>
+          <td id="detail-status-${username}">${hasFork ? '<ui-status-badge status="aceita"></ui-status-badge>' : '<ui-status-badge status="pendente" label="Não aceitou"></ui-status-badge>'}</td>
+          <td id="detail-commits-${username}">${hasFork ? loadingCell : dash}</td>
+          <td id="detail-issues-${username}">${hasFork ? loadingCell : dash}</td>
+          <td id="detail-tag-${username}">${hasFork ? loadingCell : dash}</td>
+          <td class="cell-actions">${repoLink} ${memberDeleteBtn}</td>
+        </tr>`;
+      }
+
+      for (const f of allForks) {
+        const username = f.owner?.login || 'desconhecido';
+        if (memberNames.has(username)) continue;
+        const displayName = f.owner?.full_name || username;
+        const forkName = forkNameMap[username] || repoName;
+        const repoLink = `<a href="${giteaUrl}/${username}/${forkName}" target="_blank" rel="noopener">Abrir fork</a>`;
+        const teamId = team?.id || '';
+        const approveBtn = teamId
+          ? `<button class="btn btn-sm btn-primary" onclick="approveStudent('${teamId}', '${username}', '${repoOwner}', '${repoName}', this)">Aprovar</button>`
+          : '<span class="muted">Sem equipe</span>';
+        const deleteBtn = `<button class="btn btn-sm btn-secondary" onclick="deleteFork('${username}', '${forkName}', this)">Excluir fork</button>`;
+        rows += `<tr class="row-warning" data-status="fora" data-search="${(displayName + ' ' + username).toLowerCase()}">
+          <td>${displayName}<small>${username}</small></td>
+          <td id="detail-status-${username}"><ui-status-badge status="pendente" label="Fora da turma"></ui-status-badge></td>
+          <td id="detail-commits-${username}">${loadingCell}</td>
+          <td id="detail-issues-${username}">${loadingCell}</td>
+          <td id="detail-tag-${username}">${loadingCell}</td>
+          <td class="cell-actions">${repoLink} ${approveBtn} ${deleteBtn}</td>
+        </tr>`;
+      }
+
+      const pendingCount = allForks.filter(f => !memberNames.has(f.owner?.login)).length;
+      const filters = [
+        { id: 'all', label: 'Todos' },
+        { id: 'entregue', label: 'Entregaram' },
+        { id: 'aceita', label: 'Sem commits' },
+        { id: 'naoaceitou', label: 'Não aceitaram' },
+        ...(pendingCount > 0 ? [{ id: 'fora', label: 'Fora da turma' }] : []),
+      ];
+      container.innerHTML = `
+        <nav class="breadcrumb" aria-label="Trilha">
+          <a href="acompanhamento.html${backOrgParam}">Acompanhamento</a><span aria-hidden="true">/</span>
+          <span class="mono">${repoOwner}</span><span aria-hidden="true">/</span>
+          <span>${repoName}</span>
+        </nav>
+        <div class="page-title">
+          <div class="page-title-text">
+            <h1 class="mono">${repoName}</h1>
+            <p>${members.length} matriculados · ${forkOwners.size} aceitaram${pendingCount > 0 ? ` · ${pendingCount} fora da turma` : ''}</p>
+          </div>
+          <div class="page-actions">
+            <a href="acompanhamento.html${backOrgParam}" class="btn btn-secondary">Voltar</a>
+            <a href="${giteaUrl}/${repoOwner}/${repoName}" target="_blank" rel="noopener" class="btn btn-secondary">Abrir no Forgejo</a>
+          </div>
+        </div>
+        ${members.length === 0 && allForks.length === 0
+          ? '<div class="empty-state"><p>Nenhum aluno matriculado e nenhum fork encontrado.</p></div>'
+          : `<div class="toolbar">
+              <div class="chips" role="group" aria-label="Filtrar por status">
+                ${filters.map(f => `<button type="button" class="chip" data-filter="${f.id}" aria-pressed="${f.id === 'all'}">${f.label} · <span class="num" data-count="${f.id}">…</span></button>`).join('')}
+              </div>
+              <div class="search-field">
+                <label for="student-search">Buscar aluno</label>
+                <input id="student-search" type="search" placeholder="Nome ou usuário" autocomplete="off" />
+              </div>
+            </div>
+            <section class="table-card" aria-label="Alunos da tarefa">
+              <table>
+                <thead><tr><th scope="col">Aluno</th><th scope="col">Status</th><th scope="col">Commits</th><th scope="col">Issues abertas</th><th scope="col">Coleta</th><th scope="col"><span class="visually-hidden">Ações</span></th></tr></thead>
+                <tbody id="detail-tbody">${rows}</tbody>
+              </table>
+              <div class="table-card-footer" id="detail-footer"></div>
+            </section>`}
+      `;
+
+      setupFilters();
+
+      const commitCounts = {};
+      for (const username of Object.keys(forkDateMap)) {
+        const cell = document.getElementById(`detail-commits-${username}`);
+        if (!cell) continue;
+        try {
+          const count = await countCommitsSince(username, forkNameMap[username] || repoName, forkDateMap[username]);
+          commitCounts[username] = count;
+          cell.innerHTML = `<span class="commits"><span class="num">${count}</span><span class="mini-bar"><span id="detail-bar-${username}" style="width:0%"></span></span></span>`;
+          if (count > 0 && memberNames.has(username)) {
+            const statusCell = document.getElementById(`detail-status-${username}`);
+            if (statusCell) statusCell.innerHTML = '<ui-status-badge status="entregue"></ui-status-badge>';
+            const row = cell.closest('tr');
+            if (row) row.dataset.status = 'entregue';
+          }
+        } catch (_) { cell.innerHTML = dash; }
+        updateMiniBars(commitCounts);
+        updateFilterCounts();
+
+        const tagCell = document.getElementById(`detail-tag-${username}`);
+        if (tagCell) {
+          try {
+            const tags = await listRepoTags(username, forkNameMap[username] || repoName);
+            const collectTags = (Array.isArray(tags) ? tags : []).filter(t => t.name.startsWith('coleta-'));
+            if (collectTags.length > 0) {
+              const latest = collectTags.sort((a, b) => b.name.localeCompare(a.name))[0];
+              tagCell.innerHTML = `<span class="badge badge-ok">${latest.name.replace('coleta-', '').substring(0, 10)}</span>`;
+            } else {
+              tagCell.innerHTML = '<span class="muted">Não coletado</span>';
+            }
+          } catch (_) { tagCell.innerHTML = dash; }
+        }
+      }
+
+      const teacherUser = sessionStorage.getItem('teacher_gitea_user');
+      for (const username of Object.keys(forkDateMap)) {
+        const cell = document.getElementById(`detail-issues-${username}`);
+        if (!cell) continue;
+        try {
+          const issues = await listRepoIssues(username, forkNameMap[username] || repoName, teacherUser || undefined);
+          const open = issues.filter(i => i.state === 'open').length;
+          const total = issues.length;
+          let cls;
+          if (total === 0) cls = '';
+          else if (open === 0) cls = 'badge-ok';
+          else cls = 'badge-warning';
+          cell.innerHTML = total === 0
+            ? '<span class="muted">Nenhuma</span>'
+            : `<span class="badge ${cls} num">${open} de ${total}</span>`;
+        } catch (_) { cell.innerHTML = '<span class="muted">—</span>'; }
+      }
+    }
+
+    let activeFilter = 'all';
+
+    function setupFilters() {
+      document.querySelectorAll('.chip[data-filter]').forEach(chip => {
+        chip.addEventListener('click', () => {
+          activeFilter = chip.dataset.filter;
+          document.querySelectorAll('.chip[data-filter]').forEach(c => c.setAttribute('aria-pressed', String(c === chip)));
+          applyFilters();
+        });
+      });
+      const search = document.getElementById('student-search');
+      if (search) search.addEventListener('input', applyFilters);
+      updateFilterCounts();
+    }
+
+    function applyFilters() {
+      const q = (document.getElementById('student-search')?.value || '').trim().toLowerCase();
+      const rows = [...document.querySelectorAll('#detail-tbody tr')];
+      let shown = 0;
+      for (const row of rows) {
+        const okStatus = activeFilter === 'all' || row.dataset.status === activeFilter;
+        const okSearch = !q || (row.dataset.search || '').includes(q);
+        row.hidden = !(okStatus && okSearch);
+        if (!row.hidden) shown++;
+      }
+      const footer = document.getElementById('detail-footer');
+      if (footer) footer.textContent = `Mostrando ${shown} de ${rows.length}`;
+    }
+
+    function updateFilterCounts() {
+      const rows = [...document.querySelectorAll('#detail-tbody tr')];
+      document.querySelectorAll('[data-count]').forEach(el => {
+        const id = el.dataset.count;
+        el.textContent = id === 'all' ? rows.length : rows.filter(r => r.dataset.status === id).length;
+      });
+      applyFilters();
+    }
+
+    function updateMiniBars(counts) {
+      const max = Math.max(1, ...Object.values(counts));
+      for (const [username, count] of Object.entries(counts)) {
+        const bar = document.getElementById(`detail-bar-${username}`);
+        if (bar) bar.style.width = (count / max * 100) + '%';
+      }
+    }
+
+    window.approveStudent = async function(teamId, username, repoOwner, repoName, btn) {
+      btn.disabled = true;
+      btn.textContent = 'Aprovando...';
+      try {
+        await addTeamMember(teamId, username);
+        btn.textContent = '✓ Aprovado';
+        btn.style.backgroundColor = 'var(--color-success, #2e7d32)';
+        btn.style.color = 'white';
+        renderDetail();
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = 'Erro';
+        alert('Erro ao aprovar: ' + err.message);
+      }
+    };
+
+    window.deleteFork = async function(username, forkName, btn) {
+      if (!confirm(`Excluir repositório ${username}/${forkName}?`)) return;
+      btn.disabled = true;
+      btn.textContent = 'Excluindo...';
+      try {
+        await deleteRepo(username, forkName);
+        btn.textContent = '✓ Excluído';
+        btn.style.backgroundColor = 'var(--color-error, #c62828)';
+        btn.style.color = 'white';
+        renderDetail();
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = 'Erro';
+        alert('Erro ao excluir: ' + err.message);
+      }
+    };
+
+    renderDetail();
+  </script>
+</body>
+</html>

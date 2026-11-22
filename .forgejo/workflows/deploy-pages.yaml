@@ -1,0 +1,274 @@
+name: Build and Deploy to Pages
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      node_version:
+        description: 'Versao do Node.js'
+        default: '22'
+        required: false
+        type: string
+      build_command:
+        description: 'Comando de build (vazio = auto-detectado)'
+        default: ''
+        required: false
+        type: string
+      output_dir:
+        description: 'Diretorio de saida do build (vazio = auto-detectado)'
+        default: ''
+        required: false
+        type: string
+
+# Serializa deploys por repositorio - repos diferentes rodam em paralelo
+concurrency:
+  group: pages-deploy-${{ github.repository_owner }}-${{ github.event.repository.name }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: docker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # Detecta: package manager, framework e diretorio de saida
+      # Suporta: npm | pnpm | yarn | bun
+      #          Vite | Astro | Next.js | Nuxt | SvelteKit | Vue CLI | Vue+Vite | generico
+      # ------------------------------------------------------------------
+      - name: Detect build environment
+        id: detect
+        run: |
+          # === Package manager (pelo lockfile) ===
+          if   [ -f "pnpm-lock.yaml" ];                  then PM="pnpm"
+          elif [ -f "bun.lockb" ] || [ -f "bun.lock" ];  then PM="bun"
+          elif [ -f "yarn.lock" ];                        then PM="yarn"
+          else                                                 PM="npm"
+          fi
+
+          # === Framework (pelo arquivo de config ou diretorio) ===
+          if   [ -f "astro.config.mjs" ]  || [ -f "astro.config.ts" ]  || [ -f "astro.config.js" ];  then FRAMEWORK="astro";     DEFAULT_OUT="dist"
+          elif [ -f "next.config.js" ]    || [ -f "next.config.mjs" ]  || [ -f "next.config.ts" ];   then FRAMEWORK="nextjs";    DEFAULT_OUT="out"
+          elif [ -f "nuxt.config.ts" ]    || [ -f "nuxt.config.js" ];                                 then FRAMEWORK="nuxt";      DEFAULT_OUT=".output/public"
+          elif [ -f "svelte.config.js" ]  || [ -f "svelte.config.ts" ];                               then FRAMEWORK="sveltekit"; DEFAULT_OUT="build"
+          # Vue CLI (vue.config.js sem vite.config - projetos legados @vue/cli)
+          # Vue + Vite (create-vue) tem vite.config.js e e capturado pelo caso vite abaixo
+          elif [ -f "vue.config.js" ]     || [ -f "vue.config.ts" ];                                  then FRAMEWORK="vue-cli";   DEFAULT_OUT="dist"
+          elif [ -f "vite.config.js" ]    || [ -f "vite.config.ts" ] || [ -f "vite.config.mjs" ];    then FRAMEWORK="vite";      DEFAULT_OUT="dist"
+          # VuePress: detecta pelo diretorio .vuepress dentro de src/, docs/ ou raiz
+          elif [ -d "src/.vuepress" ];   then FRAMEWORK="vuepress"; DEFAULT_OUT="src/.vuepress/dist"
+          elif [ -d "docs/.vuepress" ];  then FRAMEWORK="vuepress"; DEFAULT_OUT="docs/.vuepress/dist"
+          elif [ -d ".vuepress" ];       then FRAMEWORK="vuepress"; DEFAULT_OUT=".vuepress/dist"
+          else
+            # Nenhum arquivo de config encontrado — inspeciona package.json pelas dependencias
+            if [ -f "package.json" ]; then
+              if   grep -qE '"vite"\s*:'             package.json; then FRAMEWORK="vite";      DEFAULT_OUT="dist"
+              elif grep -qE '"astro"\s*:'            package.json; then FRAMEWORK="astro";     DEFAULT_OUT="dist"
+              elif grep -qE '"next"\s*:'             package.json; then FRAMEWORK="nextjs";    DEFAULT_OUT="out"
+              elif grep -qE '"nuxt"\s*:'             package.json; then FRAMEWORK="nuxt";      DEFAULT_OUT=".output/public"
+              elif grep -qE '"@sveltejs/kit"\s*:'    package.json; then FRAMEWORK="sveltekit"; DEFAULT_OUT="build"
+              elif grep -qE '"@vue/cli-service"\s*:' package.json; then FRAMEWORK="vue-cli";  DEFAULT_OUT="dist"
+              elif grep -qE '"vuepress"\s*:'         package.json; then
+                FRAMEWORK="vuepress"
+                # Extrai o diretorio de docs do script vuepress build (ex: 'build src' -> src)
+                DOCS_DIR=$(grep -oE 'vuepress(-vite)? build [^"\\]+' package.json \
+                  | grep -oE '[^ ]+$' | tr -d '\\n' || echo "src")
+                DOCS_DIR="${DOCS_DIR:-src}"
+                DEFAULT_OUT="$DOCS_DIR/.vuepress/dist"
+                echo "(VuePress docs dir detectado: $DOCS_DIR)"
+              elif grep -qE '"vue"\s*:'              package.json; then FRAMEWORK="vite";      DEFAULT_OUT="dist"
+              else                                                       FRAMEWORK="generic";   DEFAULT_OUT="dist"
+              fi
+              echo "(detectado via package.json)"
+            else
+              # Sem package.json — use override via workflow_dispatch
+              FRAMEWORK="generic"
+              DEFAULT_OUT="dist"
+            fi
+          fi
+
+          # === Aplicar overrides do workflow_dispatch ===
+          OUTPUT_DIR="${{ inputs.output_dir }}"
+          OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_OUT}"
+
+          BUILD_CMD="${{ inputs.build_command }}"
+          if [ -z "$BUILD_CMD" ]; then
+            # VuePress geralmente usa 'docs:build' em vez de 'build'
+            if [ "$FRAMEWORK" = "vuepress" ] && grep -qE '"docs:build"\s*:' package.json 2>/dev/null; then
+              BUILD_CMD="$PM run docs:build"
+            else
+              BUILD_CMD="$PM run build"
+            fi
+          fi
+
+          echo "pm=$PM"               >> "$GITHUB_OUTPUT"
+          echo "framework=$FRAMEWORK"  >> "$GITHUB_OUTPUT"
+          echo "output_dir=$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+          echo "build_cmd=$BUILD_CMD"   >> "$GITHUB_OUTPUT"
+
+          echo "Package manager : $PM"
+          echo "Framework       : $FRAMEWORK"
+          echo "Output directory: $OUTPUT_DIR"
+          echo "Build command   : $BUILD_CMD"
+
+      # ------------------------------------------------------------------
+      # Instala o package manager, se necessario
+      # ------------------------------------------------------------------
+      - name: Setup package manager
+        run: |
+          case "${{ steps.detect.outputs.pm }}" in
+            pnpm)
+              corepack enable
+              corepack prepare pnpm@latest --activate
+              ;;
+            yarn)
+              corepack enable
+              corepack prepare yarn@stable --activate
+              ;;
+            bun)
+              curl -fsSL https://bun.sh/install | bash
+              echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+              ;;
+            npm)
+              echo "npm ja esta disponivel"
+              ;;
+          esac
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version || '22' }}
+
+      - name: Install dependencies
+        run: |
+          case "${{ steps.detect.outputs.pm }}" in
+            pnpm) pnpm install ;;
+            yarn) yarn install --frozen-lockfile ;;
+            bun)  bun install ;;
+            npm)  npm ci 2>/dev/null || npm install ;;
+          esac
+
+      # ------------------------------------------------------------------
+      # Build - injeta BASE_PATH via env var e flag CLI quando suportado
+      #
+      # Frameworks e o que precisam:
+      #   Vite      -> --base via CLI (automatico aqui)
+      #   Vue CLI   -> publicPath no vue.config.js lendo process.env.BASE_PATH
+      #              NOTA: Vue+Vite (create-vue) e detectado como "vite" e recebe --base automaticamente
+      #   VuePress  -> base no .vuepress/config.js/ts lendo process.env.BASE_PATH
+      #   Astro     -> configurar base no astro.config lendo process.env.BASE_PATH
+      #   Next.js   -> configurar basePath no next.config lendo process.env.BASE_PATH
+      #   Nuxt      -> configurar router.base lendo process.env.BASE_PATH
+      #   SvelteKit -> configurar paths.base no svelte.config lendo process.env.BASE_PATH
+      # ------------------------------------------------------------------
+      - name: Build
+        run: |
+          BASE_PATH="/${{ github.repository_owner }}/${{ github.event.repository.name }}/"
+          FRAMEWORK="${{ steps.detect.outputs.framework }}"
+          BUILD_CMD="${{ steps.detect.outputs.build_cmd }}"
+          OUTPUT_DIR="${{ steps.detect.outputs.output_dir }}"
+
+          echo "Building with BASE_PATH=$BASE_PATH"
+
+          # Exporta para qualquer framework que leia via env var
+          export BASE_PATH
+          export PUBLIC_BASE_URL="$BASE_PATH"        # Astro / SvelteKit
+          export VITE_BASE_URL="$BASE_PATH"          # apps com import.meta.env.VITE_BASE_URL
+          export NEXT_PUBLIC_BASE_PATH="$BASE_PATH"  # Next.js public env
+
+          case "$FRAMEWORK" in
+            vite)
+              # Vite aceita --base diretamente na CLI
+              # O -- separa os args do package manager dos args do script
+              $BUILD_CMD -- --base="$BASE_PATH"
+              ;;
+            vuepress)
+              # VuePress le 'base' do arquivo de config (.vuepress/config.js ou config.ts)
+              # Configure assim (VuePress 2.x):
+              #   import { defineUserConfig } from 'vuepress'
+              #   export default defineUserConfig({
+              #     base: process.env.BASE_PATH || '/'
+              #   })
+              $BUILD_CMD
+              ;;
+            vue-cli)
+              # Vue CLI le publicPath de vue.config.js
+              # Configure: publicPath: process.env.BASE_PATH || '/'
+              # VUE_APP_* e a convencao de env vars publicas do Vue CLI
+              export VUE_APP_BASE_PATH="$BASE_PATH"
+              $BUILD_CMD
+              ;;
+            *)
+              # Demais frameworks: leem BASE_PATH via process.env (se configurado)
+              $BUILD_CMD
+              ;;
+          esac
+
+          echo "Build concluido. Conteudo de $OUTPUT_DIR:"
+          ls -la "$OUTPUT_DIR/"
+
+      - name: Configure git
+        run: |
+          git config --global user.email "ssslabinho@s3lab.dpdns.org"
+          git config --global user.name "SsslabinhoBot (O bot da s3lab)"
+
+      # ------------------------------------------------------------------
+      # Commit o build na branch "pages"
+      # ------------------------------------------------------------------
+      - name: Commit build to pages branch
+        run: |
+          OUTPUT_DIR="${{ steps.detect.outputs.output_dir }}"
+
+          # Diretorio temporario unico por run - evita colisao entre runs paralelos
+          STAGING_DIR="/tmp/pages-dist-$GITHUB_RUN_ID"
+          cp -r "$OUTPUT_DIR" "$STAGING_DIR"
+
+          git checkout pages || git checkout --orphan pages
+          git rm -rf .
+          # Remove tudo que git rm nao toca (node_modules, cache, output dir, etc.)
+          find . -maxdepth 1 -mindepth 1 ! -name '.git' -exec rm -rf {} +
+          cp -r "$STAGING_DIR/." .
+          git add -A
+          git commit -m "Deploy to pages [run #$GITHUB_RUN_ID] (${{ steps.detect.outputs.framework }})"
+          git push origin pages --force
+
+          # Exporta caminhos para o proximo step
+          DEPLOY_TARGET="$WEB_PAGES_DIR/${{ github.repository_owner }}/${{ github.event.repository.name }}"
+          echo "STAGING_DIR=$STAGING_DIR"    >> "$GITHUB_ENV"
+          echo "DEPLOY_TARGET=$DEPLOY_TARGET" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------
+      # Copia o build para WEB_PAGES_DIR/owner/repo com swap atomico
+      # Garante que o nginx nunca sirva arquivos incompletos
+      # ------------------------------------------------------------------
+      - name: Deploy to Pages branch
+        run: |
+          echo "Deploying to $DEPLOY_TARGET (from $STAGING_DIR)"
+
+          # Swap atomico via mv (operacao atomica no mesmo filesystem)
+          PARENT_DIR="$(dirname "$DEPLOY_TARGET")"
+          SWAP_DIR="$PARENT_DIR/.pages-swap-$GITHUB_RUN_ID"
+
+          mkdir -p "$PARENT_DIR"
+          mkdir -p "$SWAP_DIR"
+          cp -r "$STAGING_DIR/." "$SWAP_DIR/"
+
+          if [ -d "$DEPLOY_TARGET" ]; then
+            OLD_DIR="$PARENT_DIR/.pages-old-$GITHUB_RUN_ID"
+            mv "$DEPLOY_TARGET" "$OLD_DIR"
+            mv "$SWAP_DIR" "$DEPLOY_TARGET"
+            rm -rf "$OLD_DIR"
+          else
+            mv "$SWAP_DIR" "$DEPLOY_TARGET"
+          fi
+
+          rm -rf "$STAGING_DIR"
+
+          echo "Deploy concluido."
+          echo "  URL path : /${{ github.repository_owner }}/${{ github.event.repository.name }}/"
+          echo "  Diretorio: $DEPLOY_TARGET"
+          ls -la "$DEPLOY_TARGET"

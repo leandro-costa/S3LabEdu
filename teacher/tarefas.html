@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tarefas — Professor — IFBA</title>
+  <link rel="stylesheet" href="../css/academic.css" />
+  <link rel="stylesheet" href="../css/design-tokens.css" />
+  <script type="module" src="../components/ui-form.js"></script>
+  <script type="module" src="../components/ui-date.js"></script>
+  <script type="module" src="../components/gitea-api.js"></script>
+  <script type="module" src="../components/page-header.js"></script>
+  <script type="module" src="../components/tab-nav.js"></script>
+  <style>
+    #tarefas-form-area:not(:empty) { margin-bottom: 20px; }
+  </style>
+</head>
+<body data-theme="bancada">
+  <page-header role="teacher" title="Professor"></page-header>
+  <div class="app-shell">
+    <tab-nav role="teacher" active="tarefas"></tab-nav>
+    <main class="app-main" id="tarefas-content"></main>
+  </div>
+
+  <script type="module">
+    import { listOwnerOrganizations, listOrgRepos, createOrgRepo, ensureAlunosTeam, addTeamRepo, protectTaskBranch, getRepoTopics, setRepoTopic, deleteRepo, requireAuth, displayUserInfo, getDisplayUrl, loadOwnerOrgs, getTaskReposForOrg, CACHE_KEY_CLASSES, CACHE_KEY_TASKS, listForks, createRepoTag, listRepoTags, getRepo, removeRepoTopic } from '../components/gitea-api.js';
+    import { getSelectedOrg, setSelectedOrg, orgSelectHtml } from '../components/org-filter.js';
+
+    await requireAuth();
+    displayUserInfo('teacher');
+
+    const giteaUrl = getDisplayUrl();
+
+    let reposCache = {};
+
+    async function loadRepos(orgName) {
+      if (!reposCache[orgName]) {
+        reposCache[orgName] = await listOrgRepos(orgName);
+      }
+      return reposCache[orgName];
+    }
+
+    function showError(msg) {
+      document.getElementById('tarefas-content').innerHTML = `<div class="error-msg">${msg}</div>`;
+    }
+
+    async function render() {
+      const container = document.getElementById('tarefas-content');
+      const ownerOrgs = await loadOwnerOrgs();
+      if (ownerOrgs.length === 0) {
+        container.innerHTML = '<div class="empty-state"><p>Crie uma turma primeiro para adicionar tarefas.</p></div>';
+        return;
+      }
+      const selectedOrg = getSelectedOrg(ownerOrgs);
+      const selectedTask = new URLSearchParams(window.location.search).get('task') || 'all';
+
+      let orgTasks = [];
+      if (selectedOrg === 'all') {
+        for (const org of ownerOrgs) {
+          const repos = await getTaskReposForOrg(org.username);
+          orgTasks = orgTasks.concat(repos.map(r => ({ ...r, orgName: org.username })));
+        }
+      } else {
+        orgTasks = await getTaskReposForOrg(selectedOrg);
+      }
+
+      const taskRepos = selectedTask === 'all' ? orgTasks : orgTasks.filter(t => t.repoName === selectedTask);
+
+      container.innerHTML = `
+        <div class="section-header">
+          <h2>Tarefas</h2>
+          <button class="btn btn-primary" onclick="showCreateTaskForm()">+ Nova Tarefa</button>
+        </div>
+        <div id="tarefas-form-area"></div>
+        <div class="filters">
+          ${orgSelectHtml({ id: 'task-org-select', orgs: ownerOrgs, selected: selectedOrg, label: 'Filtrar por Turma' })}
+          <div class="form-group" style="min-width:200px">
+            <label>Filtrar por Tarefa</label>
+            <select id="task-filter" onchange="taskChanged(this)">
+              <option value="all" ${selectedTask === 'all' ? 'selected' : ''}>Todas as tarefas</option>
+              ${orgTasks.map(t => `<option value="${t.repoName}" ${t.repoName === selectedTask ? 'selected' : ''}>${t.name}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        ${taskRepos.length === 0 ? '<div class="empty-state"><p>Nenhuma tarefa encontrada.</p></div>' : `
+        <table>
+          <thead><tr>${selectedOrg === 'all' ? '<th>Turma</th>' : ''}<th>Nome</th><th>Prazo</th><th>Repositório</th><th>Ações</th></tr></thead>
+          <tbody>${taskRepos.map(t => {
+            const org = selectedOrg === 'all' ? t.orgName : selectedOrg;
+            return `<tr>
+              ${selectedOrg === 'all' ? `<td>${t.orgName}</td>` : ''}
+              <td><strong>${t.name}</strong>${t.description ? `<br><small style="color:var(--color-text-secondary)">${t.description}</small>` : ''}</td>
+              <td><ui-date value="${t.deadline}"></ui-date></td>
+              <td><a href="${giteaUrl}/${org}/${t.name}" target="_blank">${org}/${t.name}</a></td>
+              <td><button class="btn btn-sm btn-secondary" onclick="copyTaskLink('${org}', '${t.name}', this)">Copiar Link</button>
+                <button class="btn btn-sm btn-primary" onclick="collectForks('${org}', '${t.name}', this)">Coletar</button>
+                <button class="btn btn-sm btn-secondary" onclick="getCollectScript('${org}', '${t.name}', this)">Script</button>
+                <button class="btn btn-sm btn-danger" onclick="deleteTaskRepo('${org}', '${t.name}', this)">Excluir</button></td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table>`}
+      `;
+    }
+
+    window.render = render;
+
+    window.showCreateTaskForm = async function() {
+      const ownerOrgs = await loadOwnerOrgs();
+      let selectedOrg = document.getElementById('task-org-select')?.value || ownerOrgs[0]?.username;
+      if (selectedOrg === 'all' || !selectedOrg) selectedOrg = ownerOrgs[0]?.username;
+      if (!selectedOrg) {
+        document.getElementById('tarefas-form-area').innerHTML = '<div class="error-msg">Nenhuma turma disponível.</div>';
+        return;
+      }
+      const today = new Date().toISOString().split('T')[0];
+      document.getElementById('tarefas-form-area').innerHTML = `
+        <ui-form>
+          <div class="form-group"><label>Turma</label>
+            <select id="task-form-org" onchange="loadTaskRepoOptions(this.value)">
+              ${ownerOrgs.map(o => `<option value="${o.username}" ${o.username === selectedOrg ? 'selected' : ''}>${o.username}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>Nome da Tarefa</label><input type="text" id="task-name" placeholder="Ex: Projeto 1" /></div>
+          <div class="form-group"><label>Prazo</label><input type="date" id="task-deadline" min="${today}" /></div>
+          <div class="form-group"><label>Repositório Existente</label>
+            <select id="task-repo"><option value="">Carregando...</option></select>
+            <small id="task-repo-hint" style="color:var(--color-text-secondary)"></small>
+          </div>
+          <div class="form-group"><label>Ou criar novo repositório</label><input type="text" id="task-new-repo" placeholder="Nome do novo repositório" /></div>
+          <div class="form-actions">
+            <button class="btn btn-secondary" onclick="cancelTaskForm()">Cancelar</button>
+            <button class="btn btn-primary" onclick="createTask(this)">Criar Tarefa</button>
+          </div>
+        </ui-form>
+      `;
+      await loadTaskRepoOptions(selectedOrg);
+    };
+
+    window.loadTaskRepoOptions = async function(org) {
+      const select = document.getElementById('task-repo');
+      const hint = document.getElementById('task-repo-hint');
+      if (!select) return;
+      select.innerHTML = '<option value="">Carregando...</option>';
+      if (hint) hint.textContent = '';
+      let repos;
+      try {
+        // Forks de alunos ficam na conta do aluno, não na org; repositórios da org que
+        // são forks (ex.: criados a partir de um modelo do professor) também valem como tarefa.
+        repos = await loadRepos(org) || [];
+      } catch (e) {
+        select.innerHTML = '<option value="">Selecionar...</option>';
+        if (hint) hint.textContent = 'Erro ao carregar repositórios: ' + e.message;
+        return;
+      }
+      const existingTasks = await getTaskReposForOrg(org);
+      const usedRepos = new Set(existingTasks.map(t => t.name));
+      const available = repos.filter(r => !usedRepos.has(r.name));
+      // Ignora respostas atrasadas se o professor trocou de turma no meio do carregamento
+      if (document.getElementById('task-form-org')?.value !== org) return;
+      select.innerHTML = '<option value="">Selecionar...</option>' +
+        available.map(r => `<option value="${r.name}">${r.name}</option>`).join('');
+      if (hint && available.length === 0) {
+        hint.textContent = repos.length === 0
+          ? `A turma ${org} não possui repositórios. Crie um novo abaixo.`
+          : `Todos os repositórios da turma ${org} já são tarefas. Crie um novo abaixo.`;
+      }
+    };
+
+    window.cancelTaskForm = function() {
+      document.getElementById('tarefas-form-area').innerHTML = '';
+    };
+
+    window.createTask = async function(btn) {
+      btn.disabled = true;
+      const org = document.getElementById('task-form-org').value;
+      const name = document.getElementById('task-name').value.trim();
+      if (!name) { btn.disabled = false; alert('Informe o nome da tarefa.'); return; }
+      const deadline = document.getElementById('task-deadline').value;
+      let repo = document.getElementById('task-new-repo').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+
+      let team;
+      try {
+        team = await ensureAlunosTeam(org);
+      } catch (e) {
+        btn.disabled = false;
+        alert('Erro ao obter time "alunos": ' + e.message);
+        return;
+      }
+
+      if (!repo) {
+        repo = document.getElementById('task-repo').value;
+        if (!repo) { btn.disabled = false; alert('Selecione um repositório existente ou informe o nome de um novo.'); return; }
+      } else {
+        try {
+          await createOrgRepo(org, repo);
+        } catch (e) {
+          if (!e.message.includes('already exists')) {
+            btn.disabled = false; alert('Erro ao criar repositório: ' + e.message);
+            return;
+          }
+        }
+      }
+
+      try {
+        await addTeamRepo(team.id, org, repo);
+      } catch (e) {
+        const alreadyAdded = e.message && (
+          e.message.includes('already') ||
+          e.message.includes('exist')
+        );
+        if (!alreadyAdded) {
+          btn.disabled = false;
+          alert('Erro ao adicionar time ao repositório: ' + e.message);
+          return;
+        }
+      }
+      try {
+        await protectTaskBranch(org, repo);
+      } catch (e) {
+        btn.disabled = false;
+        alert('Erro ao proteger a branch principal: ' + e.message);
+        return;
+      }
+      try {
+        await setRepoTopic(org, repo, 'type-task');
+        if (deadline) {
+          await setRepoTopic(org, repo, `deadline-${deadline}`);
+        }
+      } catch (e) {
+        btn.disabled = false; alert('Erro ao configurar tópicos: ' + e.message);
+        return;
+      }
+      reposCache[org] = null;
+      render();
+    };
+
+    async function performDeleteTask(owner, repo) {
+      const area = document.getElementById('tarefas-form-area');
+      try {
+        await deleteRepo(owner, repo);
+        reposCache[owner] = null;
+        await render();
+        document.getElementById('tarefas-form-area').innerHTML = `<div class="success-msg">Repositório ${owner}/${repo} excluído com sucesso.</div>`;
+      } catch (err) {
+        area.innerHTML = '<div class="error-msg">Erro ao excluir: ' + err.message + '</div>';
+      }
+    }
+
+    window.deleteTaskRepo = async function(owner, repo, btn) {
+      btn.disabled = true;
+      const area = document.getElementById('tarefas-form-area');
+      area.innerHTML = '<div class="loading">Verificando forks da tarefa...</div>';
+      let forksCount = 0;
+      try {
+        // forks_count inclui forks privados que o professor não consegue listar
+        forksCount = (await getRepo(owner, repo))?.forks_count ?? 0;
+      } catch (err) {
+        area.innerHTML = '<div class="error-msg">Erro ao verificar forks: ' + err.message + '. A exclusão foi cancelada.</div>';
+        btn.disabled = false;
+        return;
+      }
+
+      if (forksCount === 0) {
+        area.innerHTML = '';
+        if (confirm(`Excluir o repositório ${owner}/${repo}? Nenhum aluno aceitou esta tarefa.`)) {
+          await performDeleteTask(owner, repo);
+        }
+        btn.disabled = false;
+        return;
+      }
+
+      const forks = (await listForks(owner, repo).catch(() => [])) || [];
+      let collected = 0;
+      for (const f of forks) {
+        try {
+          const tags = await listRepoTags(f.owner.login, f.name);
+          if (tags.some(t => t.name.startsWith('coleta-'))) collected++;
+        } catch (_) {}
+      }
+      const hidden = Math.max(0, forksCount - forks.length);
+      area.innerHTML = `
+        <ui-form>
+          <div class="error-msg" style="margin-bottom:16px">
+            <strong>Atenção:</strong> ${forksCount} aluno(s) já aceitaram a tarefa <strong>${owner}/${repo}</strong>
+            ${forks.length ? ` — ${collected} de ${forks.length} fork(s) visíveis já têm coleta` : ''}${hidden ? ` (${hidden} fork(s) privados sem acesso do professor)` : ''}.
+          </div>
+          <p style="margin-bottom:8px">Excluir o repositório <strong>não pode ser desfeito</strong> e:</p>
+          <ul style="margin:0 0 16px 20px">
+            <li>remove a tarefa do painel dos alunos;</li>
+            <li>desvincula os forks, que viram repositórios independentes nas contas dos alunos;</li>
+            <li>faz Acompanhamento, Coleta e Script deixarem de encontrar esses forks.</li>
+          </ul>
+          ${forks.length ? `<details style="margin-bottom:16px"><summary>Forks visíveis (${forks.length})</summary><ul style="margin:8px 0 0 20px">${forks.map(f => `<li>${f.owner.login}/${f.name}</li>`).join('')}</ul></details>` : ''}
+          <p style="margin-bottom:16px">Para apenas tirar a tarefa das listas, mantendo o repositório e os forks, use <strong>Remover da lista de tarefas</strong>. Ela pode voltar depois em "+ Nova Tarefa" &gt; "Repositório Existente".</p>
+          <div class="form-group"><label for="delete-confirm-name">Para excluir definitivamente, digite <strong>${repo}</strong></label>
+            <input type="text" id="delete-confirm-name" autocomplete="off" oninput="document.getElementById('delete-confirm-btn').disabled = this.value.trim() !== '${repo}'" />
+          </div>
+          <div class="form-actions">
+            <button class="btn btn-secondary" onclick="cancelTaskForm()">Cancelar</button>
+            <button class="btn btn-secondary" onclick="unlistTask('${owner}', '${repo}', this)">Remover da lista de tarefas</button>
+            <button class="btn btn-danger" id="delete-confirm-btn" disabled onclick="confirmDeleteTask('${owner}', '${repo}', this)">Excluir definitivamente</button>
+          </div>
+        </ui-form>`;
+      btn.disabled = false;
+    };
+
+    window.confirmDeleteTask = async function(owner, repo, btn) {
+      if (document.getElementById('delete-confirm-name')?.value.trim() !== repo) return;
+      btn.disabled = true;
+      btn.textContent = 'Excluindo...';
+      await performDeleteTask(owner, repo);
+    };
+
+    window.unlistTask = async function(owner, repo, btn) {
+      btn.disabled = true;
+      const area = document.getElementById('tarefas-form-area');
+      try {
+        await removeRepoTopic(owner, repo, 'type-task');
+        reposCache[owner] = null;
+        await render();
+        document.getElementById('tarefas-form-area').innerHTML = `<div class="success-msg">Tarefa ${owner}/${repo} removida da lista. O repositório e os forks foram mantidos.</div>`;
+      } catch (err) {
+        area.innerHTML = '<div class="error-msg">Erro ao remover da lista: ' + err.message + '</div>';
+      }
+    };
+
+    window.orgChanged = function(select) {
+      setSelectedOrg(select.value);
+      render();
+    };
+
+    window.taskChanged = function(select) {
+      const p = new URLSearchParams(window.location.search);
+      if (select.value === 'all') p.delete('task');
+      else p.set('task', select.value);
+      const qs = p.toString();
+      const url = qs ? '?' + qs : window.location.pathname;
+      history.replaceState(null, '', url);
+      window.dispatchEvent(new CustomEvent('org-changed'));
+      render();
+    };
+
+    window.copyTaskLink = function(owner, repo, btn) {
+      btn.disabled = true;
+      const origin = window.location.origin;
+      const basePath = origin + window.location.pathname.replace(/\/teacher\/.*$/, '');
+      navigator.clipboard.writeText(`${basePath}/task/?owner=${owner}&repo=${repo}`).finally(() => {
+        btn.disabled = false;
+      });
+    };
+
+    const lastCollectMap = {};
+
+    window.collectForks = async function(org, repo, btn) {
+      btn.disabled = true;
+      const key = `${org}/${repo}`;
+      const now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const dateStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+      const timeStr = `${pad(now.getHours())}${pad(now.getMinutes())}`;
+
+      let tagName = null;
+      if (lastCollectMap[key] && lastCollectMap[key].startsWith(`coleta-${dateStr}`)) {
+        tagName = lastCollectMap[key];
+      } else {
+        try {
+          const existingTags = await listRepoTags(org, repo);
+          const todayTag = (Array.isArray(existingTags) ? existingTags : [])
+            .find(t => t.name.startsWith(`coleta-${dateStr}`));
+          if (todayTag) tagName = todayTag.name;
+        } catch (_) {}
+      }
+
+      if (tagName) {
+        if (!confirm('Já existe coleta para hoje. Tentar novamente?')) {
+          btn.disabled = false;
+          return;
+        }
+      } else {
+        tagName = `coleta-${dateStr}-${timeStr}`;
+      }
+
+      const area = document.getElementById('tarefas-form-area');
+      area.innerHTML = '<div class="loading">Coletando forks...</div>';
+
+      try {
+        const forks = await listForks(org, repo) || [];
+        const allForks = Array.isArray(forks) ? forks : [];
+        const successes = [];
+        const failures = [];
+
+        for (const f of allForks) {
+          const username = f.owner?.login;
+          if (!username) continue;
+          try {
+            await createRepoTag(username, f.name, tagName);
+            successes.push({ username, clone_url: f.clone_url });
+          } catch (err) {
+            const msg = err.message || '';
+            if (msg.includes('409') || msg.includes('already exists')) {
+              successes.push({ username, clone_url: f.clone_url });
+            } else {
+              failures.push({ username, reason: msg });
+            }
+          }
+        }
+
+        lastCollectMap[key] = tagName;
+        const total = allForks.length;
+        const ok = successes.length;
+        const fail = failures.length;
+
+        if (ok > 0) {
+          try {
+            await createRepoTag(org, repo, tagName);
+          } catch (e) {
+            area.innerHTML += `<div class="error-msg">Aviso: tag no repositório da tarefa falhou (${e.message})</div>`;
+          }
+        }
+
+        if (fail === 0) {
+          area.innerHTML = `<div class="success-msg">${ok}/${total} forks coletados com tag ${tagName}</div>`;
+        } else {
+          area.innerHTML = `<div class="error-msg">${ok}/${total} forks coletados, ${fail} falhas</div>`;
+        }
+
+        if (ok > 0) {
+          const script = buildCollectScript(org, repo, tagName, successes);
+
+          const btnId = 'copy-script-btn-' + Date.now();
+          area.innerHTML += `<div style="margin-top:12px"><button id="${btnId}" class="btn btn-sm btn-secondary" onclick="copyCollectScript(this, '${btnId}')">Copiar script de coleta</button></div>`;
+          window._collectScript = script;
+        }
+      } catch (err) {
+        area.innerHTML = `<div class="error-msg">Erro na coleta: ${err.message}</div>`;
+      }
+      btn.disabled = false;
+    };
+
+    window.copyCollectScript = function(btn, btnId) {
+      if (window._collectScript) {
+        navigator.clipboard.writeText(window._collectScript).catch(() => {});
+        if (btn) {
+          btn.textContent = '✓ Copiado!';
+          setTimeout(() => {
+            const el = document.getElementById(btnId);
+            if (el) el.textContent = 'Copiar script de coleta';
+          }, 2000);
+        }
+      }
+    };
+
+    window.getCollectScript = async function(org, repo, btn) {
+      const key = `${org}/${repo}`;
+      let tagName = lastCollectMap[key] || null;
+
+      if (!tagName) {
+        const tags = await listRepoTags(org, repo);
+        const collectTags = (Array.isArray(tags) ? tags : []).filter(t => t.name.startsWith('coleta-'));
+        if (collectTags.length === 0) {
+          const area = document.getElementById('tarefas-form-area');
+          area.innerHTML = '<div class="error-msg">Nenhuma tag de coleta encontrada. Faça uma coleta primeiro.</div>';
+          return;
+        }
+        if (collectTags.length === 1) {
+          tagName = collectTags[0].name;
+        } else {
+          const area = document.getElementById('tarefas-form-area');
+          let html = '<div class="form-group" style="max-width:300px"><label>Selecionar tag de coleta</label>';
+          html += '<select id="collect-tag-select">';
+          for (const t of collectTags.sort((a, b) => b.name.localeCompare(a.name))) {
+            html += `<option value="${t.name}">${t.name}</option>`;
+          }
+          html += '</select>';
+          html += '<div style="margin-top:8px"><button class="btn btn-sm btn-primary" onclick="generateScriptFromTag(\'' + org + '\', \'' + repo + '\')">Gerar Script</button></div></div>';
+          area.innerHTML = html;
+          return;
+        }
+      }
+
+      await generateAndCopyScript(org, repo, tagName);
+    };
+
+    window.generateScriptFromTag = async function(org, repo) {
+      const select = document.getElementById('collect-tag-select');
+      if (!select) return;
+      await generateAndCopyScript(org, repo, select.value);
+    };
+
+    function buildCollectScript(org, repo, tagName, forks) {
+      const base = `${org}/${repo}/${tagName}`;
+      let script = `$initialLocation = Get-Location\n`;
+      script += `Write-Host "Criando pasta ${base}..."\n`;
+      script += `mkdir -Force "${base}" | Out-Null\n`;
+      script += `Set-Location "${base}"\n`;
+      script += 'Write-Host "Clonando forks..."\n';
+      for (const f of forks) {
+        const username = f.username || f.owner?.login;
+        const url = f.clone_url;
+        if (!username || !url) continue;
+        script += `if (Test-Path "${username}") { Remove-Item -Recurse -Force "${username}" }\n`;
+        script += `git clone --branch ${tagName} ${url} ${username}\n`;
+      }
+      script += 'Set-Location $initialLocation\n';
+      script += 'Write-Host "Concluido!"';
+      return script;
+    }
+    window.buildCollectScript = buildCollectScript;
+
+    async function generateAndCopyScript(org, repo, tagName) {
+      const forks = await listForks(org, repo) || [];
+      const allForks = Array.isArray(forks) ? forks : [];
+      const script = buildCollectScript(org, repo, tagName, allForks);
+      navigator.clipboard.writeText(script).catch(() => {});
+      const area = document.getElementById('tarefas-form-area');
+      area.innerHTML = `<div class="success-msg">✓ Script copiado! (${tagName}, ${allForks.filter(f => f.owner?.login).length} forks)</div>`;
+    }
+
+    render();
+  </script>
+</body>
+</html>

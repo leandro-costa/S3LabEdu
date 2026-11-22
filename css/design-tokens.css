@@ -1,0 +1,171 @@
+:root, [data-theme="brown"] {
+  --font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', 'Courier New', monospace;
+  --color-bg: #fff;
+  --color-text: #3E2723;
+  --color-text-secondary: #8D6E63;
+  --color-primary: #5D4037;
+  --color-primary-dark: #4E342E;
+  --color-primary-light: #A1887F;
+  --color-primary-lighter: #D7CCC8;
+  --color-surface: #F0EEEC;
+  --color-surface-card: #fff;
+  --color-surface-dark: #000;
+  --color-svg-primary: var(--color-primary);
+  --color-svg-light: var(--color-primary-light);
+  --color-header-bg: rgba(255,255,255,0.97);
+  --gradient-hero: linear-gradient(135deg, #3E2723, #5D4037);
+  --gradient-cta: linear-gradient(135deg, #3E2723, #5D4037);
+  --color-btn-text: #fff;
+  --color-btn-submit-text: #3E2723;
+  --color-btn-submit-bg: #fff;
+  --color-btn-submit-hover: #F0EEEC;
+}
+
+[data-theme="blue"] {
+  --color-bg: #fff;
+  --color-text: #0D47A1;
+  --color-text-secondary: #64B5F6;
+  --color-primary: #1565C0;
+  --color-primary-dark: #0D47A1;
+  --color-primary-light: #90CAF9;
+  --color-primary-lighter: #BBDEFB;
+  --color-surface: #E3F2FD;
+  --color-surface-card: #fff;
+  --color-surface-dark: #0D47A1;
+  --color-svg-primary: var(--color-primary);
+  --color-svg-light: var(--color-primary-light);
+  --color-header-bg: rgba(255,255,255,0.97);
+  --gradient-hero: linear-gradient(135deg, #0D47A1, #1565C0);
+  --gradient-cta: linear-gradient(135deg, #0D47A1, #1565C0);
+  --color-btn-text: #fff;
+  --color-btn-submit-text: #0D47A1;
+  --color-btn-submit-bg: #fff;
+  --color-btn-submit-hover: #E3F2FD;
+}
+
+[data-theme="green"] {
+  --color-bg: #fff;
+  --color-text: #1B5E20;
+  --color-text-secondary: #66BB6A;
+  --color-primary: #2E7D32;
+  --color-primary-dark: #1B5E20;
+  --color-primary-light: #81C784;
+  --color-primary-lighter: #C8E6C9;
+  --color-surface: #E8F5E9;
+  --color-surface-card: #fff;
+  --color-surface-dark: #1B5E20;
+  --color-svg-primary: var(--color-primary);
+  --color-svg-light: var(--color-primary-light);
+  --color-header-bg: rgba(255,255,255,0.97);
+  --gradient-hero: linear-gradient(135deg, #1B5E20, #2E7D32);
+  --gradient-cta: linear-gradient(135deg, #1B5E20, #2E7D32);
+  --color-btn-text: #fff;
+  --color-btn-submit-text: #1B5E20;
+  --color-btn-submit-bg: #fff;
+  --color-btn-submit-hover: #E8F5E9;
+}
+
+[data-theme="academic"] {
+  --color-bg: #F5F7FA;
+  --color-text: #1A202C;
+  --color-text-secondary: #4A5568;
+  --color-primary: #2B6CB0;
+  --color-primary-dark: #1A365D;
+  --color-primary-light: #63B3ED;
+  --color-primary-lighter: #BEE3F8;
+  --color-surface: #EDF2F7;
+  --color-surface-card: #fff;
+  --color-surface-dark: #1A202C;
+  --color-svg-primary: var(--color-primary);
+  --color-svg-light: var(--color-primary-light);
+  --color-header-bg: rgba(255,255,255,0.97);
+  --gradient-hero: linear-gradient(135deg, #1A365D, #2B6CB0);
+  --gradient-cta: linear-gradient(135deg, #1A365D, #2B6CB0);
+  --color-btn-text: #fff;
+  --color-btn-submit-text: #2B6CB0;
+  --color-btn-submit-bg: #fff;
+  --color-btn-submit-hover: #EDF2F7;
+}
+
+[data-theme="dark"] {
+  --color-bg: #1E1E2E;
+  --color-text: #CDD6F4;
+  --color-text-secondary: #6C7086;
+  --color-primary: #45475A;
+  --color-primary-dark: #313244;
+  --color-primary-light: #585B70;
+  --color-primary-lighter: #45475A;
+  --color-surface: #313244;
+  --color-surface-card: #45475A;
+  --color-surface-dark: #11111B;
+  --color-svg-primary: #7F849C;
+  --color-svg-light: #A6ADC8;
+  --color-header-bg: rgba(30,30,46,0.97);
+  --gradient-hero: linear-gradient(135deg, #11111B, #1E1E2E);
+  --gradient-cta: linear-gradient(135deg, #11111B, #1E1E2E);
+  --color-btn-text: #CDD6F4;
+  --color-btn-submit-text: #CDD6F4;
+  --color-btn-submit-bg: #45475A;
+  --color-btn-submit-hover: #585B70;
+}
+
+/* Bancada: Inter na interface, JetBrains Mono só para código (repositórios,
+   matrículas, comandos). Um acento verde-petróleo sobre fundo cinza claro. */
+[data-theme="bancada"] {
+  --font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  --color-bg: #F6F7F9;
+  --color-text: #111827;
+  --color-text-secondary: #4B5563;
+  --color-primary: #0F766E;
+  --color-primary-dark: #134E4A;
+  --color-primary-light: #9FD6CF;
+  --color-primary-lighter: #E5E7EB;
+  --color-accent-soft: #E6F4F2;
+  --color-border: #E5E7EB;
+  --color-border-strong: #D1D5DB;
+  --color-divider: #F0F1F3;
+  --color-surface: #F3F4F6;
+  --color-surface-card: #FFFFFF;
+  --color-surface-dark: #134E4A;
+  --color-svg-primary: var(--color-primary);
+  --color-svg-light: var(--color-primary-light);
+  --color-header-bg: #FFFFFF;
+  --gradient-hero: #134E4A;
+  --gradient-cta: #134E4A;
+  --color-btn-text: #FFFFFF;
+  --color-btn-submit-text: #134E4A;
+  --color-btn-submit-bg: #FFFFFF;
+  --color-btn-submit-hover: #E6F4F2;
+  --color-info-bg: #DBEAFE;
+  --color-info: #1E40AF;
+  --color-warning-bg: #FEF3C7;
+  --color-warning: #92400E;
+  --color-warning-row: #FFFBEB;
+  --color-error-bg: #FEE2E2;
+  --color-error: #991B1B;
+  --color-success-bg: #E6F4F2;
+  --color-success: #134E4A;
+}
+
+[data-theme="s3lab"] {
+  --color-bg: #fff;
+  --color-text: #0F172A;
+  --color-text-secondary: #475569;
+  --color-primary: #0D9488;
+  --color-primary-dark: #115E59;
+  --color-primary-light: #2DD4BF;
+  --color-primary-lighter: #CCFBF1;
+  --color-surface: #F0FDFA;
+  --color-surface-card: #fff;
+  --color-surface-dark: #115E59;
+  --color-svg-primary: var(--color-primary);
+  --color-svg-light: var(--color-primary-light);
+  --color-header-bg: rgba(255,255,255,0.97);
+  --gradient-hero: linear-gradient(135deg, #0F172A, #115E59);
+  --gradient-cta: linear-gradient(135deg, #115E59, #0F172A);
+  --color-btn-text: #fff;
+  --color-btn-submit-text: #115E59;
+  --color-btn-submit-bg: #fff;
+  --color-btn-submit-hover: #CCFBF1;
+}

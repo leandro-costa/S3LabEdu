@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Alunos da Turma — IFBA</title>
+  <link rel="stylesheet" href="../css/academic.css" />
+  <link rel="stylesheet" href="../css/design-tokens.css" />
+  <script type="module" src="../components/page-header.js"></script>
+  <script type="module" src="../components/tab-nav.js"></script>
+  <style>
+    .status-item { display:flex; align-items:center; gap:8px; padding:4px 0; font-size:0.85rem; }
+    .status-item .icon { width:20px; text-align:center; font-size:1rem; }
+    .status-item.processing { color:var(--color-text-secondary); }
+    .status-item.success { color:var(--color-success, #2e7d32); }
+    .status-item.not-found { color:var(--color-warning, #f57f17); }
+    .status-item.error { color:var(--color-error, #c62828); }
+    .retry-btn { font-size:0.75rem; padding:2px 8px; cursor:pointer; }
+    .bulk-progress { margin-top:8px; font-size:0.85rem; color:var(--color-text-secondary); }
+  </style>
+</head>
+<body data-theme="bancada">
+  <page-header role="teacher" title="Professor"></page-header>
+  <div class="app-shell">
+    <tab-nav role="teacher" active="turmas"></tab-nav>
+    <main class="app-main">
+    <div id="section-header" class="section-header"></div>
+    <div id="msg-area"></div>
+
+    <div class="card" style="margin-bottom:24px">
+      <h3 style="margin-bottom:12px">Adicionar Alunos</h3>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <label for="bulk-emails" class="visually-hidden">E-mails dos alunos, um por linha</label>
+        <textarea id="bulk-emails" rows="5" placeholder="Um email por linha"></textarea>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" id="bulk-enroll-btn">Adicionar em Lote</button>
+        </div>
+        <div id="bulk-status"></div>
+      </div>
+    </div>
+
+    <div id="alunos-table"></div>
+    </main>
+  </div>
+
+  <script type="module">
+    import { findUserByEmail, ensureAlunosTeam, addTeamMember, listTeamMembers, removeOrgMember , requireAuth, displayUserInfo, getDisplayUrl } from '../components/gitea-api.js';
+    import { rememberOrg } from '../components/org-filter.js';
+
+    await requireAuth();
+
+    const orgName = new URLSearchParams(window.location.search).get('org');
+    if (orgName) rememberOrg(orgName);
+    const CACHE_KEY = `academic_enrollments_${orgName}`;
+
+    displayUserInfo('teacher');
+
+    function saveCachedMembers(members) {
+      sessionStorage.setItem(CACHE_KEY, JSON.stringify(members));
+    }
+
+    function getCachedMembers() {
+      return JSON.parse(sessionStorage.getItem(CACHE_KEY) || '[]');
+    }
+
+    async function loadMembers() {
+      if (!orgName) return [];
+      try {
+        const team = await ensureAlunosTeam(orgName);
+        const members = await listTeamMembers(team.id);
+        saveCachedMembers(members);
+        return members;
+      } catch (e) {
+        return getCachedMembers();
+      }
+    }
+
+    async function render() {
+      if (!orgName) {
+        document.getElementById('alunos-table').innerHTML = '<div class="error-msg">Organização não informada.</div>';
+        return;
+      }
+
+      const members = await loadMembers();
+
+      document.getElementById('section-header').innerHTML = `
+        <h2>${orgName}</h2>
+        <a href="turmas.html" class="btn btn-secondary">Voltar</a>
+      `;
+
+      document.getElementById('alunos-table').innerHTML = members.length === 0
+        ? '<div class="empty-state"><p>Nenhum aluno matriculado nesta turma.</p></div>'
+        : `<table>
+            <thead><tr><th>Nome Completo</th><th>Usuário Gitea</th><th>Ações</th></tr></thead>
+            <tbody>${members.map(m => `<tr>
+              <td>${m.full_name || m.login}</td>
+              <td>${m.login}</td>
+              <td><button class="btn btn-sm btn-danger" onclick="removeStudent('${m.login}', this)">Remover</button></td>
+            </tr>`).join('')}</tbody>
+          </table>`;
+    }
+
+    document.getElementById('bulk-enroll-btn').addEventListener('click', bulkEnroll);
+
+    async function bulkEnroll() {
+      const btn = document.getElementById('bulk-enroll-btn');
+      const textarea = document.getElementById('bulk-emails');
+      const statusArea = document.getElementById('bulk-status');
+      const emails = textarea.value.split('\n').map(e => e.trim()).filter(e => e.length > 0);
+
+      if (emails.length === 0) {
+        document.getElementById('msg-area').innerHTML = '<div class="error-msg">Informe ao menos um email.</div>';
+        return;
+      }
+
+      btn.disabled = true;
+      statusArea.innerHTML = '<div class="bulk-progress">Preparando...</div>';
+
+      let team;
+      try {
+        team = await ensureAlunosTeam(orgName);
+      } catch (err) {
+        statusArea.innerHTML = `<div class="error-msg">Erro ao criar/obter time "alunos": ${err.message}</div>`;
+        btn.disabled = false;
+        return;
+      }
+
+      statusArea.innerHTML = '';
+      let processed = 0;
+      let successCount = 0;
+      let notFoundCount = 0;
+      let errorCount = 0;
+
+      for (const email of emails) {
+        const statusDiv = document.createElement('div');
+        statusDiv.className = 'status-item processing';
+        statusDiv.innerHTML = '<span class="icon">&#x23F3;</span><span>' + email + ': processando...</span>';
+        statusArea.appendChild(statusDiv);
+
+        try {
+          const giteaUser = await findUserByEmail(email);
+
+          if (giteaUser) {
+            try {
+              await addTeamMember(team.id, giteaUser.login);
+            } catch (addErr) {
+              const isAlreadyMember = addErr.message && (
+                addErr.message.includes('already') ||
+                addErr.message.includes('already a member') ||
+                addErr.message.includes('existente') ||
+                addErr.message.includes('já')
+              );
+              if (!isAlreadyMember) throw addErr;
+            }
+
+            const displayName = giteaUser.full_name || giteaUser.login;
+            statusDiv.className = 'status-item success';
+            statusDiv.innerHTML = '<span class="icon">&#x2705;</span><span>' + email + ' → ' + displayName + ' (' + giteaUser.login + ')' + ': Adicionado</span>';
+            successCount++;
+          } else {
+            statusDiv.className = 'status-item not-found';
+            statusDiv.innerHTML = '<span class="icon">&#x26A0;</span><span>' + email + ': Não encontrado no Gitea</span>';
+            notFoundCount++;
+          }
+
+          processed++;
+          statusArea.appendChild(document.createTextNode(''));
+        } catch (err) {
+          statusDiv.className = 'status-item error';
+          statusDiv.innerHTML = '<span class="icon">&#x274C;</span><span>' + email + ': ' + err.message + '</span>';
+          errorCount++;
+          processed++;
+        }
+      }
+
+      const summary = document.createElement('div');
+      summary.className = 'bulk-progress';
+      summary.textContent = 'Processados: ' + processed + ' | Sucesso: ' + successCount + ' | Não encontrados: ' + notFoundCount + ' | Erros: ' + errorCount;
+      statusArea.appendChild(summary);
+
+      textarea.value = '';
+      btn.disabled = false;
+      await render();
+    }
+
+    window.removeStudent = async function(username, btn) {
+      if (!confirm(`Remover ${username} da organização ${orgName}?`)) return;
+      btn.disabled = true;
+      btn.textContent = 'Removendo...';
+      try {
+        await removeOrgMember(orgName, username);
+        document.getElementById('msg-area').innerHTML = `<div class="success-msg">${username} removido da organização.</div>`;
+        await render();
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = 'Remover';
+        document.getElementById('msg-area').innerHTML = `<div class="error-msg">Erro ao remover: ${err.message}</div>`;
+      }
+    };
+
+    render();
+  </script>
+</body>
+</html>

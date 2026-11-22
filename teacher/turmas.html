@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Turmas — Professor — IFBA</title>
+  <link rel="stylesheet" href="../css/academic.css" />
+  <link rel="stylesheet" href="../css/design-tokens.css" />
+  <script type="module" src="../components/ui-form.js"></script>
+  <script type="module" src="../components/ui-inline.js"></script>
+  <script type="module" src="../components/gitea-api.js"></script>
+  <script type="module" src="../components/page-header.js"></script>
+  <script type="module" src="../components/tab-nav.js"></script>
+</head>
+<body data-theme="bancada">
+  <page-header role="teacher" title="Professor"></page-header>
+  <div class="app-shell">
+    <tab-nav role="teacher" active="turmas"></tab-nav>
+    <main class="app-main" id="turmas-content"></main>
+  </div>
+
+  <script type="module">
+    import { listOwnerOrganizations, createOrganization, ensureAlunosTeam, requireAuth, displayUserInfo, getDisplayUrl, loadOwnerOrgs, CACHE_KEY_CLASSES } from '../components/gitea-api.js';
+    import { getSelectedOrg, setSelectedOrg, orgSelectHtml } from '../components/org-filter.js';
+
+    await requireAuth();
+    displayUserInfo('teacher');
+
+    function showError(msg) {
+      document.getElementById('turmas-content').innerHTML = `<div class="error-msg">${msg}</div>`;
+    }
+
+    async function render() {
+      const container = document.getElementById('turmas-content');
+      const orgs = await loadOwnerOrgs();
+      const selectedOrg = getSelectedOrg(orgs);
+      const visibleOrgs = selectedOrg === 'all' ? orgs : orgs.filter(o => o.username === selectedOrg);
+
+      container.innerHTML = `
+        <div class="section-header">
+          <h2>Turmas</h2>
+          <button class="btn btn-primary" onclick="showCreateClassForm()">+ Nova Turma</button>
+        </div>
+        <div id="turmas-form-area"></div>
+        ${orgs.length === 0 ? '<div class="empty-state"><p>Nenhuma turma cadastrada. Crie sua primeira turma!</p></div>' : `
+        <div class="filters">
+          ${orgSelectHtml({ id: 'turma-org-select', orgs, selected: selectedOrg, label: 'Filtrar por Turma' })}
+        </div>
+        <table>
+          <thead><tr><th>Nome</th><th>Organização</th><th>Descrição</th><th>Ações</th></tr></thead>
+          <tbody>${visibleOrgs.map(o => `
+            <tr>
+              <td><strong>${o.username}</strong></td>
+              <td><a href="${getDisplayUrl()}/${o.username}" target="_blank">${o.username}</a></td>
+              <td>${o.description || '-'}</td>
+               <td>
+                <ui-inline>
+                  <a href="turma-alunos.html?org=${o.username}" class="btn btn-sm btn-secondary" style="text-decoration:none">Alunos</a>
+                </ui-inline>
+              </td>
+            </tr>`).join('')}</tbody>
+        </table>`}
+      `;
+    }
+
+    window.showCreateClassForm = async function() {
+      const orgs = await loadOwnerOrgs();
+      document.getElementById('turmas-form-area').innerHTML = `
+        <ui-form>
+          <div class="form-group"><label>Nome da Organização (nome da turma)</label><input type="text" id="turma-org" placeholder="Ex: ads-2025-1" /></div>
+          <div class="form-group"><label>Descrição</label><input type="text" id="turma-desc" placeholder="Descrição opcional" /></div>
+          <div class="form-actions">
+            <button class="btn btn-secondary" onclick="cancelClassForm()">Cancelar</button>
+            <button class="btn btn-primary" onclick="createClass(this)">Criar Turma</button>
+          </div>
+        </ui-form>
+      `;
+    };
+
+    window.cancelClassForm = function() {
+      document.getElementById('turmas-form-area').innerHTML = '';
+    };
+
+    window.createClass = async function(btn) {
+      btn.disabled = true;
+      const org = document.getElementById('turma-org').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-');
+      if (!org) { btn.disabled = false; alert('Informe o nome da organização.'); return; }
+      const desc = document.getElementById('turma-desc').value.trim();
+      try {
+        await createOrganization(org, desc);
+        await ensureAlunosTeam(org);
+        setSelectedOrg(org);
+        render();
+      } catch (e) {
+        if (e.message.includes('already exists')) {
+          try {
+            await ensureAlunosTeam(org);
+          } catch (_) {}
+          setSelectedOrg(org);
+          render();
+        } else {
+          btn.disabled = false;
+          alert('Erro ao criar turma: ' + e.message);
+        }
+      }
+    };
+
+    window.orgChanged = function(select) {
+      setSelectedOrg(select.value);
+      render();
+    };
+
+    render();
+  </script>
+</body>
+</html>

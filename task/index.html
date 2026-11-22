@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aceitar tarefa — IFBA</title>
+  <link rel="stylesheet" href="../css/academic.css" />
+  <link rel="stylesheet" href="../css/design-tokens.css" />
+  <script type="module" src="../components/ui-date.js"></script>
+  <script type="module" src="../components/ui-status-badge.js"></script>
+  <script type="module" src="../components/page-header.js"></script>
+  <script type="module" src="../components/gitea-api.js"></script>
+</head>
+<body data-theme="bancada">
+  <page-header role="student" title="Aluno"></page-header>
+  <main class="app-main app-main--narrow">
+    <div id="task-content">
+      <div class="loading">Carregando...</div>
+    </div>
+  </main>
+
+  <script type="module">
+    import { requireAuth, getDisplayUrl, buildForkName, createForkSafe, createDeliveryIssue, getRepo, checkFork, enableRepoIssues, addRepoCollaborator, listOrgOwners } from '../components/gitea-api.js';
+
+    // Sem acesso ao repositório: quase sempre o aluno ainda não foi incluído na turma.
+    // Só o professor inclui alunos (Alunos da turma ou "Aprovar" em Detalhes da tarefa).
+    function noAccessHtml(owner, repo) {
+      const login = sessionStorage.getItem('student_gitea_user') || '—';
+      const email = sessionStorage.getItem('student_email') || '';
+      return `
+        <section class="accept-card">
+          <div class="accept-head">
+            <div>
+              <span class="hero-task-kicker accept-kicker">Tarefa</span>
+              <h1 class="accept-title mono">${repo}</h1>
+            </div>
+            <ui-status-badge status="pendente" label="Sem acesso"></ui-status-badge>
+          </div>
+          <div>
+            <h2 class="accept-subtitle">Você ainda não está na turma <span class="mono">${owner}</span></h2>
+            <p class="muted">Esta tarefa só aparece para alunos incluídos na turma. Peça ao professor para incluir a sua conta e, depois, abra este link de novo.</p>
+          </div>
+          <div class="accept-account">
+            <span class="app-avatar" aria-hidden="true">${(login[0] || '?').toUpperCase()}</span>
+            <span class="app-user-text"><strong>${email || login}</strong><small>Conta: ${login}</small></span>
+          </div>
+          <div class="accept-actions">
+            <button type="button" class="btn btn-secondary" id="copy-account" data-text="Conta: ${login}${email ? ` | E-mail: ${email}` : ''} | Turma: ${owner}">Copiar dados para o professor</button>
+            <button type="button" class="btn btn-primary" onclick="location.reload()">Tentar de novo</button>
+          </div>
+          <p class="auth-note">Se você já foi incluído na turma, confira se o link está completo.</p>
+        </section>`;
+    }
+
+    function setupCopyAccount() {
+      const btn = document.getElementById('copy-account');
+      if (!btn) return;
+      btn.addEventListener('click', async () => {
+        try { await navigator.clipboard.writeText(btn.dataset.text); btn.textContent = 'Copiado'; }
+        catch (_) { btn.textContent = btn.dataset.text; }
+        setTimeout(() => { btn.textContent = 'Copiar dados para o professor'; }, 2500);
+      });
+    }
+
+    const CHECK_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5 9-10"/></svg>';
+
+    function taskInfoHtml(owner, repo, deadlineDate) {
+      return `
+        <dl class="accept-facts">
+          <div><dt>Turma</dt><dd class="mono">${owner}</dd></div>
+          <div><dt>Prazo</dt><dd>${deadlineDate ? `<ui-date value="${deadlineDate}T12:00:00"></ui-date>` : 'Sem prazo'}</dd></div>
+          <div><dt>Repositório da turma</dt><dd class="mono">${owner}/${repo}</dd></div>
+        </dl>`;
+    }
+
+    // Próximos passos depois de aceitar: clonar o PRÓPRIO fork e entregar com o entrega.bat
+    function nextStepsHtml(giteaUrl, giteaUser, owner, forkName, basePath) {
+      const forkUrl = `${giteaUrl}/${giteaUser}/${forkName}`;
+      return `
+        <ol class="steps">
+          <li>
+            <span class="step-mark step-mark--done">${CHECK_ICON}</span>
+            <div class="step-body"><span class="step-title">Tarefa aceita — seu fork foi criado</span><span class="step-hint">O professor já tem acesso para acompanhar.</span></div>
+          </li>
+          <li>
+            <span class="step-mark step-mark--current">2</span>
+            <div class="step-body">
+              <span class="step-title">Clone o <strong>seu fork</strong>, não o repositório da turma</span>
+              <div class="copy-field">
+                <label for="clone-url" class="visually-hidden">Endereço do seu fork</label>
+                <input id="clone-url" type="text" readonly value="${forkUrl}.git" />
+                <button type="button" class="btn btn-sm btn-secondary" id="copy-clone">Copiar</button>
+              </div>
+              <span class="step-hint">O endereço começa com <span class="mono">${giteaUser}/</span>. Se começar com <span class="mono">${owner}/</span>, é o repositório original.</span>
+            </div>
+          </li>
+          <li>
+            <span class="step-mark">3</span>
+            <div class="step-body"><span class="step-title">Rode <span class="mono">entrega.bat</span> na pasta do projeto</span><span class="step-hint">Ele faz o commit, envia para o seu fork e limpa a máquina do laboratório.</span></div>
+          </li>
+        </ol>
+        <div class="accept-actions">
+          <a class="btn btn-primary" href="${forkUrl}" target="_blank" rel="noopener">Abrir meu fork</a>
+          <a class="btn btn-secondary" href="${basePath}/student/dashboard.html">Ir para Minhas tarefas</a>
+        </div>`;
+    }
+
+    function setupCopyButton() {
+      const btn = document.getElementById('copy-clone');
+      const input = document.getElementById('clone-url');
+      if (!btn || !input) return;
+      btn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(input.value);
+        } catch (_) {
+          input.select();
+          document.execCommand('copy');
+        }
+        btn.textContent = 'Copiado';
+        setTimeout(() => { btn.textContent = 'Copiar'; }, 2000);
+      });
+    }
+
+    async function init() {
+      await requireAuth();
+      const content = document.getElementById('task-content');
+      const params = new URLSearchParams(window.location.search);
+      const owner = params.get('owner');
+      const repo = params.get('repo');
+
+      if (!owner || !repo) {
+        content.innerHTML = '<div class="error-msg">Link inválido</div>';
+        return;
+      }
+      try {
+        // Repositórios de tarefa são privados e só a equipe "alunos" da turma tem leitura.
+        // Para quem não está na turma o Forgejo responde 404, igual a um repositório inexistente.
+        let repoInfo = null;
+        try { repoInfo = await getRepo(owner, repo); } catch (_) {}
+        if (!repoInfo) {
+          content.innerHTML = noAccessHtml(owner, repo);
+          setupCopyAccount();
+          return;
+        }
+        const topics = repoInfo.topics || [];
+        if (!topics.includes('type-task')) {
+          content.innerHTML = '<div class="error-msg">Este repositório não é uma tarefa. Confira o link com o professor.</div>';
+        } else {
+          const deadline = topics.find(t => t.startsWith('deadline-'));
+          const deadlineDate = deadline ? deadline.replace('deadline-', '') : null;
+          const email = sessionStorage.getItem('student_email');
+          const giteaUser = sessionStorage.getItem('student_gitea_user');
+          const basePath = window.location.origin + window.location.pathname.replace(/\/task\/.*$/, '');
+
+          if (!sessionStorage.getItem('oauth_access_token') || !email || !giteaUser) {
+            content.innerHTML = `
+              <section class="accept-card">
+                <span class="hero-task-kicker accept-kicker">Tarefa</span>
+                <h1 class="accept-title mono">${repo}</h1>
+                <p class="muted">Você precisa estar logado para aceitar esta tarefa.</p>
+                <div class="accept-actions"><a href="../login.html" class="btn btn-primary">Fazer login</a></div>
+              </section>
+            `;
+          } else {
+            const giteaUrl = getDisplayUrl();
+            const existingFork = await checkFork(owner, repo, giteaUser);
+
+            if (existingFork) {
+              content.innerHTML = `
+                <section class="accept-card">
+                  <div class="accept-head">
+                    <div>
+                      <span class="hero-task-kicker accept-kicker">Tarefa</span>
+                      <h1 class="accept-title mono">${repo}</h1>
+                    </div>
+                    <ui-status-badge status="aceita" label="Já aceita"></ui-status-badge>
+                  </div>
+                  ${taskInfoHtml(owner, repo, deadlineDate)}
+                  <div class="accept-divider"></div>
+                  ${nextStepsHtml(giteaUrl, giteaUser, owner, existingFork.name, basePath)}
+                </section>
+              `;
+              setupCopyButton();
+            } else {
+              content.innerHTML = `
+                <section class="accept-card">
+                  <div class="accept-head">
+                    <div>
+                      <span class="hero-task-kicker accept-kicker">Nova tarefa</span>
+                      <h1 class="accept-title mono">${repo}</h1>
+                    </div>
+                    <ui-status-badge id="accept-badge" status="pendente" label="Não aceita"></ui-status-badge>
+                  </div>
+                  ${taskInfoHtml(owner, repo, deadlineDate)}
+                  <div class="accept-divider"></div>
+                  <div id="accept-area">
+                    <h2 class="accept-subtitle">Aceitar tarefa</h2>
+                    <p class="muted">Aceitar cria uma cópia (fork) na sua conta, onde você vai trabalhar e entregar.</p>
+                    <div class="accept-account">
+                      <span class="app-avatar" aria-hidden="true">${(giteaUser[0] || '?').toUpperCase()}</span>
+                      <span class="app-user-text"><strong>${email}</strong><small>${giteaUser}</small></span>
+                    </div>
+                    <div id="enrollment-msg"></div>
+                    <div class="accept-actions">
+                      <button class="btn btn-primary" id="enroll-btn">Aceitar tarefa</button>
+                    </div>
+                  </div>
+                </section>
+              `;
+
+              document.getElementById('enroll-btn').addEventListener('click', async function() {
+                const msg = document.getElementById('enrollment-msg');
+                const btn = document.getElementById('enroll-btn');
+                btn.disabled = true;
+                btn.textContent = 'Aceitando...';
+
+                try {
+                  const fork = await createForkSafe(owner, repo, buildForkName(owner, giteaUser, repo));
+                  if (fork === null) {
+                    msg.innerHTML = '<div class="success-msg">Você já possui um fork desta tarefa.</div>';
+                    return;
+                  }
+
+                  const forkName = fork.name;
+                  await enableRepoIssues(fork.owner.login, forkName).catch(() => {});
+                  const owners = await listOrgOwners(owner);
+                  for (const prof of owners) {
+                    await addRepoCollaborator(fork.owner.login, forkName, prof.login, 'write').catch(() => {});
+                  }
+                  if (deadlineDate) {
+                    createDeliveryIssue(giteaUser, forkName, deadlineDate);
+                  }
+
+                  document.getElementById('accept-area').innerHTML =
+                    '<div class="success-msg">Tarefa aceita com sucesso!</div>' +
+                    nextStepsHtml(giteaUrl, giteaUser, owner, forkName, basePath);
+                  setupCopyButton();
+                  const badge = document.getElementById('accept-badge');
+                  if (badge) { badge.setAttribute('label', 'Aceita'); badge.setAttribute('status', 'aceita'); }
+                } catch (err) {
+                  msg.innerHTML = `<div class="error-msg">Erro: ${err.message || 'Erro desconhecido'}</div>`;
+                  btn.disabled = false;
+                  btn.textContent = 'Aceitar tarefa';
+                }
+              });
+            }
+          }
+        }
+      } catch (e) {
+        content.innerHTML = '<div class="error-msg">Erro ao carregar tarefa: ' + e.message + '</div>';
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

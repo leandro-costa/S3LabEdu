@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sistema de Tarefas — IFBA</title>
+  <link rel="stylesheet" href="./css/academic.css" />
+  <link rel="stylesheet" href="./css/design-tokens.css" />
+</head>
+<body data-theme="bancada">
+  <div class="auth-layout">
+    <section class="auth-aside" aria-label="Sobre o sistema">
+      <div class="app-brand">
+        <span class="app-brand-mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#134E4A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6"/><path d="M10 3v6l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3"/><path d="M7.5 15h9"/></svg></span>
+        <span class="app-brand-name">S3Lab<span>Edu</span></span>
+      </div>
+      <div class="auth-pitch">
+        <h1>Tarefas de programação direto no Git da turma.</h1>
+        <p>O professor publica um repositório; cada aluno recebe o seu fork, trabalha nele e entrega com um comando.</p>
+      </div>
+      <div class="auth-terminal" aria-hidden="true">
+        <div><b>$</b> git clone …/sua-matricula/exercicio.git</div>
+        <div><b>$</b> entrega.bat</div>
+        <div class="ok">✓ Envio concluído no seu fork</div>
+      </div>
+    </section>
+
+    <main class="auth-main">
+      <div class="auth-box">
+        <h2>Sistema de Tarefas — IFBA</h2>
+        <p>Entre com a sua conta Gitea do laboratório. Alunos e professores usam o mesmo acesso.</p>
+        <div id="msg-area"></div>
+        <a href="login.html" class="btn btn-primary">Entrar com Gitea</a>
+        <p class="auth-note">Em computador compartilhado, saia ao terminar. Assim ninguém envia código com a sua conta.</p>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('error')) {
+      document.getElementById('msg-area').innerHTML = '<div class="error-msg">' + decodeURIComponent(params.get('error')) + '</div>';
+    }
+  </script>
+</body>
+</html>
