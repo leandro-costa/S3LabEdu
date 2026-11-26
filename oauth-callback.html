@@ -41,15 +41,33 @@
         }
 
         // Recuperar dados salvos antes do redirect (PKCE verifier, config)
-        const storedRaw = sessionStorage.getItem('oauth_state_' + state);
-        sessionStorage.removeItem('oauth_state_' + state);
+        // Fica no localStorage (compartilhado entre abas) e vale por 10 minutos.
+        const STATE_KEY = 'oauth_state_' + state;
+        const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+        const storedRaw = localStorage.getItem(STATE_KEY) || sessionStorage.getItem(STATE_KEY);
+        localStorage.removeItem(STATE_KEY);
+        sessionStorage.removeItem(STATE_KEY);
 
-        if (!storedRaw) {
-          showError('Sessão expirada ou inválida (state não encontrado). Faça login novamente.');
+        let stored = null;
+        try { stored = storedRaw ? JSON.parse(storedRaw) : null; } catch (_) { stored = null; }
+        if (stored && stored.created_at && stored.created_at < Date.now() - OAUTH_STATE_TTL_MS) stored = null;
+
+        if (!stored) {
+          // State perdido (outra aba, cookie redirect_to antigo do Forgejo, expirado):
+          // reinicia o login automaticamente, no máximo uma vez por minuto para evitar loop.
+          const RETRY_KEY = 'oauth_auto_retry_at';
+          const lastRetry = parseInt(localStorage.getItem(RETRY_KEY), 10) || 0;
+          if (Date.now() - lastRetry > 60 * 1000) {
+            localStorage.setItem(RETRY_KEY, String(Date.now()));
+            statusEl.innerHTML = '<div class="loading" style="font-size:1.1rem;margin-bottom:16px">Sessão de login expirada. Reiniciando autenticação...</div>';
+            window.location.replace('login.html?auto=1');
+            return;
+          }
+          showError('Sessão expirada ou inválida (state não encontrado). Faça login novamente.<br><small>Se persistir, limpe os cookies do Forgejo neste navegador.</small>');
           return;
         }
+        localStorage.removeItem('oauth_auto_retry_at');
 
-        const stored = JSON.parse(storedRaw);
         const { verifier, redirect_uri, gitea_url, client_id } = stored;
 
         // Trocar código de autorização por tokens via POST direto ao Gitea

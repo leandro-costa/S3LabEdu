@@ -32,7 +32,7 @@
 
         <div id="msg-area"></div>
 
-        <button class="btn btn-primary" onclick="startOAuth(this)">Entrar com Gitea</button>
+        <button id="oauth-login-btn" class="btn btn-primary" onclick="startOAuth(this)">Entrar com Gitea</button>
         <a href="index.html" class="btn btn-secondary">Voltar</a>
 
         <!-- Configuração do Gitea (colapsada) -->
@@ -78,6 +78,24 @@
       return { verifier, challenge };
     }
 
+    // O state/PKCE fica no localStorage (compartilhado entre abas) para que o
+    // login funcione mesmo se o retorno do Forgejo cair em outra aba.
+    const OAUTH_STATE_PREFIX = 'oauth_state_';
+    const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+    function purgeExpiredOAuthStates() {
+      try {
+        const now = Date.now();
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const key = localStorage.key(i);
+          if (!key || !key.startsWith(OAUTH_STATE_PREFIX)) continue;
+          let expired = true;
+          try { expired = !(JSON.parse(localStorage.getItem(key)).created_at > now - OAUTH_STATE_TTL_MS); } catch (_) {}
+          if (expired) localStorage.removeItem(key);
+        }
+      } catch (_) {}
+    }
+
     function getConfig() {
       const urlInput = document.getElementById('gitea-url-input');
       const clientInput = document.getElementById('oauth-client-id-input');
@@ -117,6 +135,12 @@
       if (qsClientId) sessionStorage.setItem('oauth_client_id', qsClientId);
 
       updateRedirectUriDisplay();
+
+      // Reinício automático vindo do callback (state perdido/expirado)
+      if (params.get('auto') === '1') {
+        history.replaceState(null, '', window.location.pathname);
+        startOAuth(document.getElementById('oauth-login-btn'));
+      }
     });
 
     async function startOAuth(btn) {
@@ -136,11 +160,13 @@
         const state = generateRandomString(16);
         const redirectUri = getRedirectUri();
 
-        sessionStorage.setItem('oauth_state_' + state, JSON.stringify({
+        purgeExpiredOAuthStates();
+        localStorage.setItem(OAUTH_STATE_PREFIX + state, JSON.stringify({
           verifier,
           redirect_uri: redirectUri,
           gitea_url: config.gitea_url,
           client_id: config.client_id,
+          created_at: Date.now(),
         }));
 
         const authorizeUrl = new URL(config.gitea_url + '/login/oauth/authorize');
